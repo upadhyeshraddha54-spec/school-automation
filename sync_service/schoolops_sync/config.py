@@ -53,6 +53,7 @@ class Config:
     reconcile_minutes: float = 30.0
     file_patterns: tuple[str, ...] = ("*.xlsx", "*.xlsm")
     log_file: str = "logs/sync.log"
+    upload_folder: str = "data/uploads"  # staged copies of files added from the app
     polling: bool = False  # true for network/shared drives where file events are unreliable
     school_name: str = "School"
     header_row: int = 2
@@ -127,6 +128,7 @@ def load_config(path: str | os.PathLike) -> Config:
         reconcile_minutes=float(svc.get("reconcile_minutes", 30)),
         file_patterns=tuple(svc.get("file_patterns", ["*.xlsx", "*.xlsm"])),
         log_file=svc.get("log_file", "logs/sync.log"),
+        upload_folder=svc.get("upload_folder", "data/uploads"),
         polling=bool(svc.get("polling", False)),
         school_name=svc.get("school_name", "School"),
         header_row=int(layout.get("header_row", 2)),

@@ -162,7 +162,7 @@ async function pageDashboard(main) {
       <div class="card"><span class="v">${d.calls_today}</span><span class="k">Calls done today</span></div>
       <div class="card"><span class="v">${d.promised_today}</span><span class="k">Parents who promised today</span></div>
       <div class="card ${d.follow_ups_overdue ? "alert" : ""}"><span class="v">${d.follow_ups_today} / ${d.follow_ups_overdue}</span><span class="k">Follow-ups today / overdue</span></div>
-      ${d.pending_reviews ? `<a class="card warn" href="#sync" style="text-decoration:none;color:inherit"><span class="v">${d.pending_reviews}</span><span class="k">Excel changes to check</span></a>` : ""}
+      ${d.pending_reviews ? `<a class="card warn" href="#students" style="text-decoration:none;color:inherit"><span class="v">${d.pending_reviews}</span><span class="k">Excel changes to check</span></a>` : ""}
     </section>
     <div class="grid2">
       <section class="panel" id="nextPanel">
@@ -206,53 +206,52 @@ async function pageDashboard(main) {
     : `<p class="muted">${fuWhen === "today" ? "No parents promised to pay today." : "No overdue promises."}</p>`;
 }
 
-const stuState = { search: "", medium: "", std: "", section: "", fee_status: "", page: 1, page_size: 25 };
-async function pageStudents(main) {
-  main.innerHTML = `<section class="panel" id="stuPanel">${classFilters(stuState, { search: true, fee: true })}
-    <div id="stuTable"></div></section>`;
+const stuState = { search: "", medium: "", std: "", section: "", fee_status: "", sort: "class", page: 1, page_size: 25 };
+async function pageStudentsFees(main) {
+  const [classes, reviews] = await Promise.all([api("/classes"), api("/review")]);
+  const total = classes.reduce((a, c) => a + Number(c.pending_amount), 0);
+  const due = classes.reduce((a, c) => a + Number(c.students_due), 0);
+  const all = classes.reduce((a, c) => a + Number(c.students), 0);
+  main.innerHTML = `
+    <div class="panel-head"><p class="muted" style="margin:0">Fee amounts come from the school's Excel files. This app never marks fees as paid.</p>
+      <button class="btn main" id="addExcel">+ Add Excel</button></div>
+    <section class="cards">
+      <div class="card"><span class="v">${rupee(total)}</span><span class="k">Total fees pending</span></div>
+      <div class="card"><span class="v">${due}</span><span class="k">Students with fees due</span></div>
+      <div class="card"><span class="v">${all}</span><span class="k">Students in total</span></div>
+    </section>
+    ${reviews.length ? `<section class="panel" id="reviewPanel"><div class="panel-head"><h2>Changes to check</h2><span class="pill amber">${reviews.length} waiting</span></div>
+      <p class="muted" style="margin:0">These changes in Excel look unusual, so they were not applied. Please decide.</p>
+      <div class="list">${reviews.map(reviewHTML).join("")}</div></section>` : ""}
+    <section class="panel" id="stuPanel">
+      ${classFilters(stuState, { search: true, fee: true })}
+      <div class="filters">${selectHTML("sort", "Order", [["balance", "Highest balance first"]], stuState.sort === "balance" ? "balance" : "", "Class and Sr. No.")}</div>
+      <div id="stuTable"></div></section>`;
   const load = async () => {
-    const d = await api("/students?" + qs(stuState));
+    const d = await api("/students?" + qs({ ...stuState, sort: stuState.sort || "class" }));
     const box = $("#stuTable");
-    box.innerHTML = `<div class="tablewrap"><table><thead><tr><th class="hide-sm">Sr.</th><th>Name</th><th>Class</th><th class="hide-sm">Phone</th><th class="num">Balance</th><th>Fees</th><th class="hide-sm">Last call</th></tr></thead>
+    box.innerHTML = `<div class="tablewrap"><table><thead><tr><th class="hide-sm">Sr.</th><th>Name</th><th>Class</th><th class="hide-sm">Phone</th>
+      <th class="num hide-sm">Total</th><th class="num hide-sm">Paid</th><th class="num">Balance</th><th>Fees</th><th class="hide-sm">Last call</th></tr></thead>
       <tbody>${d.items.map((s) => `<tr class="click" data-open="${s.id}" tabindex="0"><td class="hide-sm">${esc(s.sr_no || "")}</td><td><b>${esc(s.name)}</b></td><td>${esc(s.klass)}</td>
-        <td class="hide-sm">${esc(s.contact || "–")}</td><td class="num amt">${rupee(s.balance)}</td><td>${feePill(s)}</td>
+        <td class="hide-sm">${esc(s.contact || "–")}</td><td class="num hide-sm">${rupee(s.total_fee)}</td><td class="num hide-sm">${rupee(s.paid)}</td>
+        <td class="num amt">${rupee(s.balance)}</td><td>${feePill(s)}</td>
         <td class="hide-sm">${s.last_outcome ? esc(label(s.last_outcome)) + `<br><span class="muted">${fdate(s.last_call_at)}</span>` : '<span class="muted">Not called</span>'}</td></tr>`).join("")
-        || `<tr><td colspan="7" class="empty">No students match. Try clearing the filters.</td></tr>`}</tbody></table></div>`;
+        || `<tr><td colspan="9" class="empty">${all ? "No students match. Try clearing the filters." : "No students yet. Press “+ Add Excel” to import the class files."}</td></tr>`}</tbody></table></div>`;
     box.append(pager(d, (p) => { stuState.page = p; load().catch(fail); }));
   };
   bindFilters($("#stuPanel"), stuState, () => load().catch(fail));
-  await load();
-}
-
-const feeState = { medium: "", std: "", section: "", page: 1, page_size: 25 };
-async function pageFees(main) {
-  const classes = await api("/classes");
-  const total = classes.reduce((a, c) => a + Number(c.pending_amount), 0);
-  const top = [...classes].sort((a, b) => b.pending_amount - a.pending_amount).slice(0, 8);
-  main.innerHTML = `<div class="note info">Amounts come from the school's Excel files. This app never marks fees as paid: when the office records a payment in Excel, it shows here after the next sync.</div>
-    <section class="cards">
-      <div class="card"><span class="v">${rupee(total)}</span><span class="k">Total pending</span></div>
-      ${top.slice(0, 3).map((c) => `<div class="card"><span class="v">${rupee(c.pending_amount)}</span><span class="k">${esc(c.klass)} · ${c.students_due} students</span></div>`).join("")}
-    </section>
-    <section class="panel" id="feePanel"><div class="panel-head"><h2>Students with fees due</h2><span class="muted">Highest balance first</span></div>
-      ${classFilters(feeState)}<div id="feeTable"></div></section>`;
-  const load = async () => {
-    const d = await api("/students?" + qs({ ...feeState, fee_status: "due", sort: "balance" }));
-    const box = $("#feeTable");
-    box.innerHTML = `<div class="tablewrap"><table><thead><tr><th>Name</th><th>Class</th><th class="num hide-sm">Total</th><th class="num hide-sm">Paid</th><th class="num">Balance</th><th class="hide-sm">As of</th><th class="hide-sm">Last call</th></tr></thead>
-      <tbody>${d.items.map((s) => `<tr class="click" data-open="${s.id}" tabindex="0"><td><b>${esc(s.name)}</b></td><td>${esc(s.klass)}</td>
-        <td class="num hide-sm">${rupee(s.total_fee)}</td><td class="num hide-sm">${rupee(s.paid)}</td><td class="num amt">${rupee(s.balance)}</td>
-        <td class="hide-sm">${fdate(s.fee_as_of)}</td><td class="hide-sm">${s.last_outcome ? esc(label(s.last_outcome)) : '<span class="muted">Not called</span>'}</td></tr>`).join("")
-        || `<tr><td colspan="7" class="empty">No fees due with these filters.</td></tr>`}</tbody></table></div>`;
-    box.append(pager(d, (p) => { feeState.page = p; load().catch(fail); }));
-  };
-  bindFilters($("#feePanel"), feeState, () => load().catch(fail));
+  $("#addExcel").onclick = openImport;
+  main.addEventListener("click", async (e) => {
+    const b = e.target.closest("[data-review]");
+    if (!b) return;
+    try { await api(`/review/${b.dataset.review}/${b.dataset.act}?` + qs({ by: store.get("fcd_caller", "") }), { method: "POST" }); toast("Saved"); route(true); } catch (er) { fail(er); }
+  });
   await load();
 }
 
 const callState = { search: "", medium: "", std: "", section: "", page: 1, page_size: 25 };
 async function pageCalls(main) {
-  main.innerHTML = `<section class="panel" id="callPanel"><div class="panel-head"><h2>All calls</h2><button class="btn small" id="csvBtn">Copy for Excel</button></div>
+  main.innerHTML = `<section class="panel" id="callPanel"><div class="panel-head"><h2>Call records</h2><button class="btn small" id="csvBtn">Copy for Excel</button></div>
     ${classFilters(callState, { search: true })}<div id="callTable"></div><textarea id="csvBox" hidden readonly style="width:100%;min-height:120px"></textarea></section>`;
   const load = async () => {
     const d = await api("/calls?" + qs(callState));
@@ -320,57 +319,6 @@ async function pageMessages(main, params) {
 }
 
 const REASON = { balance_increased: "the balance went up", paid_decreased: "the paid amount went down" };
-async function pageSync(main) {
-  const [st, reviews, runs] = await Promise.all([api("/sync/status"), api("/review"), api("/sync/runs?page_size=15")]);
-  const yes = (b) => (b ? "Yes" : "No");
-  main.innerHTML = `
-    ${st.test_mode ? '<div class="note info">Test mode: only the synthetic test folder is used. No real school data.</div>'
-      : '<div class="note warn">Real school folder. From this page you can only run checks (dry runs). Nothing is written to the database from here.</div>'}
-    <div class="grid2">
-      <section class="panel"><h2>Status</h2>
-        <dl class="kv"><dt>Folder</dt><dd style="word-break:break-all">${esc(st.watch_folder)}</dd>
-          <dt>Watching for saved files</dt><dd>${yes(st.watching)}${st.watcher_error ? ` <span class="muted">(${esc(st.watcher_error)})</span>` : ""}</dd>
-          <dt>Default mode</dt><dd>${st.dry_run_default ? "Dry run (check only)" : "Apply changes"}</dd>
-          <dt>Column mapping confirmed</dt><dd>${yes(st.mapping_confirmed)}</dd>
-          <dt>Payment rules confirmed</dt><dd>${yes(st.payment_rules_confirmed)}</dd></dl>
-        <div><button class="btn main" id="checkBtn">Check the folder now (dry run)</button></div>
-        <div id="checkResult"></div>
-      </section>
-      <section class="panel"><div class="panel-head"><h2>Changes to check</h2><span class="pill ${reviews.length ? "amber" : "zero"}">${reviews.length} waiting</span></div>
-        <div class="list">${reviews.map(reviewHTML).join("") || '<p class="muted">Nothing to check. Every Excel change matched the rules.</p>'}</div>
-      </section>
-    </div>
-    <section class="panel"><h2>Recent syncs</h2>
-      <div class="tablewrap"><table><thead><tr><th>When</th><th>File</th><th>How</th><th>Result</th><th class="num">New</th><th class="num">Fee updates</th><th class="num">To check</th><th class="num">Errors</th></tr></thead>
-      <tbody>${runs.items.map((r) => { const s = r.summary || {}; return `<tr class="click" data-run="${r.id}" tabindex="0"><td>${ftime(r.started_at)}</td><td>${esc(r.file_path.split(/[\\/]/).pop())}</td>
-        <td>${esc({ watcher: "File saved", reconcile: "Regular re-check", api: "From this page", manual: "Command line" }[r.trigger] || r.trigger)}</td>
-        <td>${runPill(r.status)}</td><td class="num">${s.new_students ?? "–"}</td><td class="num">${s.fee_updates ?? "–"}</td><td class="num">${s.needs_review ?? "–"}</td><td class="num">${s.errors ?? "–"}</td></tr>`; }).join("")
-        || '<tr><td colspan="8" class="empty">No syncs yet.</td></tr>'}</tbody></table></div></section>`;
-
-  $("#checkBtn").onclick = async (e) => {
-    e.target.disabled = true; e.target.textContent = "Checking…";
-    try {
-      const r = await api("/sync/run", { method: "POST", body: { dry_run: true, force: true } });
-      $("#checkResult").innerHTML = `<div class="tablewrap"><table style="min-width:480px"><thead><tr><th>File</th><th class="num">New</th><th class="num">Fee updates</th><th class="num">To check</th><th class="num">Errors</th></tr></thead><tbody>${
-        r.files.map((f) => `<tr><td>${esc(f.file)}</td><td class="num">${f.new_students ?? "–"}</td><td class="num">${f.fee_updates ?? "–"}</td><td class="num">${f.needs_review ?? "–"}</td><td class="num">${f.errors ?? "–"}</td></tr>`).join("")}</tbody></table></div>
-        <p class="muted">Dry run: nothing was changed.</p>`;
-    } catch (er) { fail(er); }
-    e.target.disabled = false; e.target.textContent = "Check the folder now (dry run)";
-  };
-  main.addEventListener("click", async (e) => {
-    const b = e.target.closest("[data-review]");
-    if (b) {
-      try { await api(`/review/${b.dataset.review}/${b.dataset.act}?` + qs({ by: store.get("fcd_caller", "") }), { method: "POST" }); toast("Saved"); route(true); } catch (er) { fail(er); }
-      return;
-    }
-    const tr = e.target.closest("[data-run]");
-    if (tr) showRun(tr.dataset.run);
-  });
-}
-function runPill(s) {
-  return { applied: '<span class="pill zero">Synced</span>', dry_run: '<span class="pill grey">Check only</span>',
-           failed: '<span class="pill due">Failed</span>', running: '<span class="pill amber">Running</span>' }[s] || esc(s);
-}
 function reviewHTML(r) {
   const d = r.details;
   if (r.kind === "fee_change") {
@@ -388,29 +336,108 @@ function reviewHTML(r) {
     <div style="display:flex;gap:8px;flex-wrap:wrap"><button class="btn small good" data-review="${r.id}" data-act="approve">Same student (keep call history)</button>
     <button class="btn small" data-review="${r.id}" data-act="reject">Different student (add new)</button></div></div>`;
 }
-async function showRun(id) {
-  const dr = $("#drawer"); dr.hidden = false; $("#scrim").hidden = false;
-  const r = await api(`/sync/runs/${id}`);
-  const s = r.summary || {};
-  dr.innerHTML = `<div class="panel-head"><h2>${esc(r.file_path.split(/[\\/]/).pop())}</h2><button class="btn small" data-close>Close</button></div>
-    <p>${runPill(r.status)} ${ftime(r.started_at)}${r.dry_run ? " · check only" : ""}</p>
-    <dl class="kv"><dt>Sheets read</dt><dd>${esc((s.sheets_read || []).join(", ") || "–")}</dd>
-      <dt>Sheets with problems</dt><dd>${esc((s.sheets_failed || []).join(", ") || "None")}</dd>
-      <dt>New students</dt><dd>${s.new_students ?? "–"}</dd><dt>Fee updates</dt><dd>${s.fee_updates ?? "–"}</dd>
-      <dt>To check</dt><dd>${s.needs_review ?? "–"}</dd><dt>Not in file any more</dt><dd>${s.missing_from_file ?? "–"}</dd></dl>
-    <h3>Problems found</h3>
-    <div class="list">${r.issues.filter((i) => i.level !== "info").map((i) => `<div class="row"><span><span class="pill ${i.level === "error" ? "due" : "amber"}">${i.level === "error" ? "Not synced" : "Check"}</span> ${esc(i.message)}</span>
-      <span class="muted">${esc(i.sheet || "")}${i.row_number ? " row " + i.row_number : ""}</span></div>`).join("") || '<p class="muted">No problems.</p>'}</div>`;
+
+/* ---------------- Add Excel: choose files -> check -> confirm -> import ---------------- */
+const imp = { token: null, files: [], picked: [] };
+function modal(html) { const m = $("#modal"); m.hidden = false; $("#scrim").hidden = false; m.innerHTML = `<div class="modal-box" role="dialog" aria-modal="true" aria-label="Add Excel">${html}</div>`; return m; }
+async function closeImport() {
+  if (imp.token) { try { await api(`/imports/${imp.token}`, { method: "DELETE" }); } catch {} }
+  imp.token = null; imp.files = []; imp.picked = [];
+  $("#modal").hidden = true; $("#scrim").hidden = true;
+}
+function openImport() {
+  imp.token = null; imp.picked = [];
+  const m = modal(`<div class="panel-head"><h2>Add Excel</h2><button class="btn small" data-imp-close>Close</button></div>
+    <p>Choose one or more class files (.xlsx). You will see a preview first. <b>Nothing is saved until you press Import.</b> Your Excel files are never changed.</p>
+    <label class="drop" for="impFiles"><input type="file" id="impFiles" multiple accept=".xlsx,.xlsm,.xls">
+      <b>Choose Excel files</b><span class="muted">or drag them here</span></label>
+    <div id="impPicked" class="list"></div>
+    <div class="modal-foot"><button class="btn" data-imp-close>Cancel</button><button class="btn main" id="impCheck" disabled>Check files</button></div>`);
+  const input = $("#impFiles", m), drop = $(".drop", m);
+  const show = (list) => {
+    imp.picked = [...list];
+    $("#impPicked", m).innerHTML = imp.picked.map((f) => `<div class="row"><span>${esc(f.name)}</span><span class="muted">${Math.ceil(f.size / 1024)} KB</span></div>`).join("");
+    $("#impCheck", m).disabled = !imp.picked.length;
+  };
+  input.onchange = () => show(input.files);
+  drop.addEventListener("dragover", (e) => { e.preventDefault(); drop.classList.add("over"); });
+  drop.addEventListener("dragleave", () => drop.classList.remove("over"));
+  drop.addEventListener("drop", (e) => { e.preventDefault(); drop.classList.remove("over"); show(e.dataTransfer.files); });
+  $("#impCheck", m).onclick = checkFiles;
+}
+async function checkFiles() {
+  const btn = $("#impCheck"); btn.disabled = true; btn.textContent = "Checking…";
+  const fd = new FormData();
+  imp.picked.forEach((f) => fd.append("files", f, f.name));
+  try {
+    const r = await fetch("/imports/preview", { method: "POST", body: fd });
+    const d = await r.json();
+    if (!r.ok) throw new Error(d.detail || "Could not check the files");
+    imp.token = d.token; imp.files = d.files;
+    showPreview(d);
+  } catch (e) { fail(e); btn.disabled = false; btn.textContent = "Check files"; }
+}
+function fileStatus(f) {
+  if (!f.importable) return '<span class="pill due">Cannot import</span>';
+  if (f.rows_with_errors || (f.sheets_failed || []).length) return '<span class="pill amber">Ready, some rows will be skipped</span>';
+  return '<span class="pill zero">Ready to import</span>';
+}
+function showPreview(d) {
+  const m = modal(`<div class="panel-head"><h2>Check before importing</h2><button class="btn small" data-imp-close>Close</button></div>
+    <p class="muted" style="margin:0">Nothing has been saved yet. Untick any file you don't want to import.</p>
+    ${d.files.map((f, i) => `<section class="panel">
+      <div class="panel-head"><label class="pick"><input type="checkbox" data-pick="${i}" ${f.importable ? "checked" : "disabled"}> <b>${esc(f.file)}</b></label>${fileStatus(f)}</div>
+      ${f.problem ? `<div class="note bad">${esc(f.problem)}</div>` : ""}
+      ${f.columns && f.columns.length ? `<div><b>Columns</b><div class="cols">${f.columns.map((c) => `<span class="pill ${c.ok ? "zero" : "due"}">${c.ok ? "✓" : "✗"} ${esc(c.heading)}${c.ok ? "" : " missing" + (c.missing_in.length ? " in " + esc(c.missing_in.join(", ")) : "")}</span>`).join("")}</div></div>` : ""}
+      ${f.sheets && f.sheets.length ? `<div><b>Classes found:</b> ${f.sheets.map((s) => `${esc(s.sheet)} (${s.students})`).join(" · ")}</div>` : ""}
+      ${f.plan ? `<div class="plan"><span><b>${f.plan.new_students}</b> new students</span><span><b>${f.plan.fee_updates}</b> fee updates</span>
+        <span><b>${f.plan.unchanged}</b> unchanged</span><span><b>${f.plan.needs_review}</b> to check by a person</span>
+        <span><b>${f.plan.rows_not_synced}</b> rows skipped</span>${f.plan.missing_from_file ? `<span><b>${f.plan.missing_from_file}</b> no longer in file (kept)</span>` : ""}</div>` : ""}
+      ${f.issues && f.issues.length ? `<details><summary>${f.issues.length} problem${f.issues.length > 1 ? "s" : ""} found</summary><div class="list">${f.issues.map((x) => `<div class="row"><span><span class="pill ${x.level === "error" ? "due" : "amber"}">${x.level === "error" ? "Skipped" : "Check"}</span> ${esc(x.message)}</span><span class="muted">${esc(x.sheet || "")}${x.row ? " row " + x.row : ""}</span></div>`).join("")}</div></details>` : ""}
+      ${f.rows && f.rows.length ? `<div class="tablewrap"><table><thead><tr><th>Sheet</th><th>Sr.</th><th>Name</th><th>Class</th><th>Phone</th><th class="num">Total</th><th class="num">Paid</th><th class="num">Balance</th><th></th></tr></thead>
+        <tbody>${f.rows.map((r) => `<tr><td>${esc(r.sheet)}</td><td>${esc(r.sr_no || "")}</td><td>${esc(r.name)}</td><td>${esc(r.class)}</td><td>${esc(r.contact || "–")}</td>
+          <td class="num">${rupee(r.total)}</td><td class="num">${rupee(r.paid)}</td><td class="num">${rupee(r.balance)}</td><td>${r.ok ? "" : '<span class="pill due">Skipped</span>'}</td></tr>`).join("")}</tbody></table></div>
+        <p class="muted" style="margin:0">Showing the first ${f.rows.length} of ${f.students_in_file} students.</p>` : ""}
+    </section>`).join("")}
+    <div id="impConfirm"></div>
+    <div class="modal-foot"><button class="btn" data-imp-close>Cancel</button><button class="btn main" id="impGo">Import selected files</button></div>`);
+  const chosen = () => [...m.querySelectorAll("[data-pick]:checked")].map((c) => imp.files[+c.dataset.pick]);
+  const sync = () => { $("#impGo", m).disabled = !chosen().length || !imp.token; $("#impConfirm", m).innerHTML = ""; };
+  m.querySelectorAll("[data-pick]").forEach((c) => (c.onchange = sync));
+  sync();
+  $("#impGo", m).onclick = () => {
+    const fs = chosen();
+    const add = fs.reduce((a, f) => a + f.plan.new_students, 0), upd = fs.reduce((a, f) => a + f.plan.fee_updates, 0);
+    const rev = fs.reduce((a, f) => a + f.plan.needs_review, 0);
+    $("#impConfirm", m).innerHTML = `<div class="note warn" style="display:grid;gap:10px"><span>Import ${fs.length} file${fs.length > 1 ? "s" : ""}? This adds <b>${add}</b> new students and updates <b>${upd}</b> fee amounts${rev ? `. <b>${rev}</b> unusual changes will wait for you under “Changes to check”` : ""}. Call records are kept.</span>
+      <div style="display:flex;gap:8px;flex-wrap:wrap"><button class="btn main" id="impYes">Yes, import</button><button class="btn" id="impNo">Go back</button></div></div>`;
+    $("#impConfirm", m).scrollIntoView({ block: "nearest" });
+    $("#impNo", m).onclick = sync;
+    $("#impYes", m).onclick = async (e) => {
+      e.target.disabled = true; e.target.textContent = "Importing…";
+      try {
+        const r = await api("/imports/confirm", { method: "POST", body: { token: imp.token, files: fs.map((f) => f.file) } });
+        imp.token = null;
+        modal(`<div class="panel-head"><h2>Import finished</h2></div>
+          <div class="list">${r.files.map((f) => `<div class="row"><span><b>${esc(f.file)}</b></span><span>${f.status === "applied"
+            ? `<span class="pill zero">Imported</span> ${f.new_students} new · ${f.fee_updates} fee updates${f.needs_review ? ` · ${f.needs_review} to check` : ""}`
+            : `<span class="pill due">Not imported</span> ${esc(f.error || "")}`}</span></div>`).join("")}</div>
+          <div class="modal-foot"><button class="btn main" data-imp-close>Done</button></div>`);
+      } catch (er) { fail(er); e.target.disabled = false; e.target.textContent = "Yes, import"; }
+    };
+  };
 }
 
 // ------------------------------------------------------------------ router
 const PAGES = {
-  dashboard: ["Dashboard", pageDashboard], students: ["Students", pageStudents], fees: ["Fee Collection", pageFees],
-  calls: ["Call History", pageCalls], messages: ["Messages", pageMessages], sync: ["Excel Sync", pageSync],
+  dashboard: ["Dashboard", pageDashboard], students: ["Students & Fees", pageStudentsFees],
+  calls: ["Call Records", pageCalls], messages: ["Messages", pageMessages],
 };
+const OLD = { fees: "students", sync: "students" };  // old links still work
 let current = "";
 async function route(keepScroll = false) {
-  const [name, query] = (location.hash.slice(1) || "dashboard").split("?");
+  let [name, query] = (location.hash.slice(1) || "dashboard").split("?");
+  name = OLD[name] || name;
   const key = PAGES[name] ? name : "dashboard";
   const params = Object.fromEntries(new URLSearchParams(query || ""));
   const [title, fn] = PAGES[key];
@@ -436,14 +463,15 @@ async function refreshBadge() {
 }
 
 document.addEventListener("click", (e) => {
+  if (e.target.closest("[data-imp-close]")) { const done = !imp.token; closeImport().then(() => done && current === "students" && route(true)); return; }
+  if (e.target.id === "scrim" && !$("#modal").hidden) return;  // don't lose an import by clicking outside
   if (e.target.closest("[data-close]") || e.target.id === "scrim") { closeDrawer(); return; }
   const o = e.target.closest("[data-open]");
   if (o && !e.target.closest("a,button,input")) openStudent(o.dataset.open);
 });
 document.addEventListener("keydown", (e) => {
-  if (e.key === "Escape") closeDrawer();
+  if (e.key === "Escape") { if (!$("#modal").hidden) closeImport(); else closeDrawer(); }
   if (e.key === "Enter" && e.target.matches("tr[data-open]")) openStudent(e.target.dataset.open);
-  if (e.key === "Enter" && e.target.matches("tr[data-run]")) showRun(e.target.dataset.run);
 });
 $("#menuBtn").onclick = () => { const s = $("#side"); s.classList.toggle("open"); $("#menuBtn").setAttribute("aria-expanded", s.classList.contains("open")); };
 $("#caller").value = store.get("fcd_caller", "");

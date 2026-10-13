@@ -14,11 +14,9 @@
     <div class="brand"><span class="logo" aria-hidden="true">₹</span><div><b>Fees Calling Desk</b><small>SchoolOps</small></div></div>
     <nav id="nav">
       <a href="#dashboard" data-page="dashboard">Dashboard</a>
-      <a href="#students" data-page="students">Students</a>
-      <a href="#fees" data-page="fees">Fee Collection</a>
-      <a href="#calls" data-page="calls">Call History</a>
+      <a href="#students" data-page="students">Students &amp; Fees <span class="badge" id="reviewBadge" hidden></span></a>
+      <a href="#calls" data-page="calls">Call Records</a>
       <a href="#messages" data-page="messages">Messages</a>
-      <a href="#sync" data-page="sync">Excel Sync <span class="badge" id="reviewBadge" hidden></span></a>
     </nav>
     <div class="side-foot">
       <label for="caller">Your name</label>
@@ -36,6 +34,7 @@
 </div>
 <div class="scrim" id="scrim" hidden></div>
 <aside class="drawer" id="drawer" hidden aria-label="Student details"></aside>
+<div class="modal" id="modal" hidden></div>
 <div id="toast" aria-live="polite"></div>
 <script src="app.js"></script>
 </body>

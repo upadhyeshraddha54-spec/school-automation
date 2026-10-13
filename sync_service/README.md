@@ -61,21 +61,33 @@ Every 30 min: full re-check of the folder (catches missed saves)
    - Files must be **.xlsx**. Old **.xls** files are rejected with a message (Save As .xlsx in Excel/WPS).
    - If the folder is on a network drive, set `polling = true`.
 
+## Start on a Mac (synthetic data)
+
+```bash
+brew install postgresql@16 python@3.12
+brew services start postgresql@16
+git clone -b excel-sync-service https://github.com/upadhyeshraddha54-spec/school-automation.git ~/school-automation
+cd ~/school-automation/sync_service && ./start_mac.sh
+```
+Next time, only: `cd ~/school-automation/sync_service && ./start_mac.sh`
+
+The script creates the `schoolops` database, a Python environment, a folder of fake class files
+(`synthetic_school/`) and `local.toml` (test mode), then opens http://127.0.0.1:8000.
+
 ## Teacher app (Fees Calling Desk)
 
-`serve` also hosts the teacher app at **http://127.0.0.1:8000/** (white theme, sidebar, works on phones).
-
-| Page | What teachers do there |
+| Tab | What teachers do there |
 |---|---|
-| Dashboard | Summary cards, **Call next parent** with the 8 one-tap results (Will pay, Gave a date, Says already paid, Call later, No answer, Phone off, Wrong number, Has a complaint), Undo, follow-ups today/overdue, each class's progress against a daily target |
-| Students | Search by name/phone/Sr. No., filter by medium, class (Nursery–10), section and fee status, 25 per page. Click a student for details, fee history, call history and a call form |
-| Fee Collection | Students with fees due, highest balance first, with the date the Excel amount was read |
-| Call History | Every call with filters, pages, and **Copy for Excel** |
-| Messages | English / हिन्दी / मराठी previews with Copy. "Save as test message" stores a log entry only; nothing is sent |
-| Excel Sync | Status, **Check the folder now (dry run)**, changes to check (approve/reject in plain words), recent syncs with problems per row |
+| Dashboard | Summary cards, **Call next parent** with the 8 one-tap results, Undo, follow-ups today/overdue, each class against a daily target |
+| Students & Fees | **+ Add Excel**, search, filters (medium, class Nursery–10, section, fee status), order by class or highest balance, 25 per page, total/paid/balance, "Changes to check". Click a student for details, fee history, call history and a call form |
+| Call Records | Every call with filters, pages, and **Copy for Excel** |
+| Messages | English / हिन्दी / मराठी previews with Copy. "Save as test message" only logs; nothing is sent |
 
-The app can never write real school data: its sync button is always a dry run, and the API refuses
-`dry_run=false` unless the service is in synthetic test mode.
+**+ Add Excel:** choose one or more .xlsx files → the app checks each file (columns found or missing,
+classes, first 8 rows, problems per row, and what would change) → untick files you don't want →
+**Import selected files** → confirm → done. Nothing is saved before the confirmation; your Excel
+files are never changed (the app works on its own copy and deletes it afterwards). Old .xls files are
+refused with a "Save As .xlsx" message. In test mode only synthetic files are accepted.
 
 ## Commands
 
@@ -85,7 +97,7 @@ The app can never write real school data: its sync button is always a dry run, a
 | `make-synthetic FOLDER` | Create fake workbooks for testing |
 | `check` | Dry run of the whole folder; prints the report |
 | `sync --apply [--file NAME] [--force]` | Apply changes; `--force` re-reads unchanged files |
-| `serve [--no-watch]` | Start the API and the folder watcher |
+| `serve [--no-watch]` | Start the app/API (and the folder watcher unless `--no-watch`) |
 
 ## API (for the UI pages)
 
@@ -109,7 +121,7 @@ Review decisions:
 export TEST_DATABASE_URL=postgresql://postgres@localhost:5432/schoolops_test
 python -m pytest -q
 ```
-41 tests cover the reader, the sync rules, the watcher (native events and polling), and the API.
+48 tests cover the reader, the sync rules, the watcher, the API and the Add Excel import.
 All test data is synthetic.
 
 ## Logs

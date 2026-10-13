@@ -8,7 +8,7 @@ from datetime import date
 from pathlib import Path
 from typing import Literal
 
-from fastapi import Depends, FastAPI, HTTPException, Query
+from fastapi import Depends, FastAPI, File, HTTPException, Query, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import RedirectResponse
 from fastapi.staticfiles import StaticFiles
@@ -17,6 +17,7 @@ from pydantic import BaseModel, Field
 from . import messages as msg
 from .config import Config, NotAllowed
 from .db import connect, init_db
+from .imports import ImportError_, confirm_import, discard_upload, preview_upload
 from .reader import STD_ORDER
 from .review import ReviewError, approve, reject
 from .sync import sync_file, sync_folder
@@ -41,6 +42,11 @@ class CallIn(BaseModel):
     follow_up_date: date | None = None
     note: str | None = Field(None, max_length=500)
     caller: str | None = Field(None, max_length=80)
+
+
+class ImportConfirm(BaseModel):
+    token: str
+    files: list[str]
 
 
 class MockMessageIn(BaseModel):
@@ -143,6 +149,32 @@ def create_app(cfg: Config, *, start_watcher: bool = True) -> FastAPI:
             return (approve if action == "approve" else reject)(conn, item_id, by)
         except ReviewError as exc:
             raise HTTPException(409, str(exc))
+
+    # ------------------------------------------------------------------ Add Excel (upload -> preview -> confirm)
+    @app.post("/imports/preview")
+    async def import_preview(files: list[UploadFile] = File(...), conn=Depends(db)):
+        data = [(f.filename, await f.read()) for f in files]
+        try:
+            return preview_upload(conn, cfg, data)
+        except ImportError_ as exc:
+            raise HTTPException(400, str(exc))
+
+    @app.post("/imports/confirm")
+    def import_confirm(req: ImportConfirm, conn=Depends(db)):
+        try:
+            return confirm_import(conn, cfg, req.token, req.files)
+        except ImportError_ as exc:
+            raise HTTPException(400, str(exc))
+        except NotAllowed as exc:
+            raise HTTPException(409, str(exc))
+
+    @app.delete("/imports/{token}")
+    def import_discard(token: str):
+        try:
+            discard_upload(cfg, token)
+        except ImportError_ as exc:
+            raise HTTPException(400, str(exc))
+        return {"discarded": True}
 
     # ------------------------------------------------------------------ students
     @app.get("/filters")

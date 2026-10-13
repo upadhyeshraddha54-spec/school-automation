@@ -5,3 +5,6 @@ __pycache__/
 synthetic_school/
 *.xlsx
 *.xls
+local.toml
+.venv/
+data/
