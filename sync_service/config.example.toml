@@ -1,0 +1,56 @@
+# SchoolOps Excel Sync configuration.
+# Copy to config.toml. Lines marked TODO must be checked against the REAL school files
+# and agreed with the school before mapping_confirmed / payment_rules.confirmed are set to true.
+
+[service]
+watch_folder = "C:/SchoolShare/Fees"          # TODO: the shared folder with the class Excel files
+database_url = "postgresql://schoolops:CHANGE_ME@localhost:5432/schoolops"
+dry_run = true            # keep true until a dry run of the real folder looks correct
+debounce_seconds = 5      # wait this long after the last save before reading a file
+reconcile_minutes = 30    # full re-check of the folder, in case a save was missed
+polling = false           # set true if the folder is on a network drive
+log_file = "logs/sync.log"
+school_name = "Your School Name"            # used in parent message previews
+
+[layout]
+header_row = 2            # TODO: row with the headings (row 1 is the school name in current files)
+first_data_row = 3
+mapping_confirmed = false # TODO: set true only after the school confirms [columns] and [classification]
+test_mode = false
+
+[columns]
+# Internal field = exact heading text in Excel (case and extra spaces are ignored).
+# Leave a field out if the school does not have that column. student_name and balance are required.
+# TODO: confirm every heading below with the school. "2500", the blank columns and
+# "old fees pending" are NOT mapped until we know what they mean.
+# student_id = ""        # GR no. / admission no. if the school has one (best identity)
+sr_no = "Sr. No."
+student_name = "Student Name"
+class_label = "Class"
+contact = "Contact"
+total_fee = "Total Amt"
+discount = "Disc. Amt"
+paid = "Paid Amt"
+balance = "Balance"
+
+# Where class, section and medium come from: the file name, the sheet (tab) name,
+# or the Class column. The regex's first group is the value.
+# TODO: confirm with the school. Examples below assume files like
+# "English - Std 1.xlsx" with tabs like "1 Peacock".
+[classification.std]
+from = "sheet"
+regex = '^(\S+)'
+
+[classification.section]
+from = "sheet"
+regex = '^\S+\s+(.+)$'
+
+[classification.medium]
+from = "file"
+regex = '^(Semi-English|English)'
+
+[payment_rules]
+# TODO: agree with the school. Until confirmed = true, both of these are forced to "review".
+confirmed = false
+balance_increase = "review"   # balance went UP since last sync -> hold for a person to check
+paid_decrease = "review"      # Paid amount went DOWN -> hold for a person to check

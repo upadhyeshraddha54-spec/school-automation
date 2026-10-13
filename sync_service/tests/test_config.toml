@@ -1,0 +1,39 @@
+# TEST-ONLY mapping. Matches the synthetic workbooks, NOT confirmed against real school files.
+[service]
+watch_folder = "WILL_BE_SET_BY_TESTS"
+database_url = "postgresql://postgres@localhost:5433/schoolops_test"
+dry_run = false
+debounce_seconds = 0.5
+reconcile_minutes = 30
+school_name = "Synthetic Test School"
+
+[layout]
+header_row = 2
+first_data_row = 3
+mapping_confirmed = false
+test_mode = true
+
+[columns]
+sr_no = "Sr. No."
+student_name = "Student Name"
+class_label = "Class"
+contact = "Contact"
+total_fee = "Total Amt"
+discount = "Disc. Amt"
+paid = "Paid Amt"
+balance = "Balance"
+
+[classification.std]
+from = "sheet"
+regex = '^(\S+)'
+
+[classification.section]
+from = "sheet"
+regex = '^\S+\s+(.+)$'
+
+[classification.medium]
+from = "file"
+regex = '^(Semi-English|English)'
+
+[payment_rules]
+confirmed = false

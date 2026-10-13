@@ -1,0 +1,7 @@
+config.toml
+logs/
+__pycache__/
+.pytest_cache/
+synthetic_school/
+*.xlsx
+*.xls
