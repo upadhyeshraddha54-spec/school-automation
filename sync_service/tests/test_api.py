@@ -112,3 +112,16 @@ def test_review_via_api(client, folder):
     assert client.post(f"/review/{items[0]['id']}/approve").status_code == 409
     detail = client.get(f"/students/{s['id']}").json()
     assert float(detail["balance"]) == float(s["balance"]) + 999 and len(detail["fee_history"]) == 2
+
+
+def test_classes_summary(client):
+    rows = client.get("/classes").json()
+    assert rows[0]["std"] == "Nursery" and sum(r["students"] for r in rows) == 84
+    assert {r["klass"] for r in rows} >= {"English 1-Peacock", "Semi-English 10-Lotus"}
+
+
+def test_app_cannot_apply_changes_to_real_data(client, cfg):
+    cfg.test_mode = False
+    cfg.mapping_confirmed = True
+    r = client.post("/sync/run", json={"dry_run": False})
+    assert r.status_code == 409 and "disabled" in r.json()["detail"]

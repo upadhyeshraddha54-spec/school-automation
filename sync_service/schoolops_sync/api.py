@@ -10,6 +10,8 @@ from typing import Literal
 
 from fastapi import Depends, FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import RedirectResponse
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from . import messages as msg
@@ -100,6 +102,10 @@ def create_app(cfg: Config, *, start_watcher: bool = True) -> FastAPI:
 
     @app.post("/sync/run")
     def run_sync(req: SyncRequest, conn=Depends(db)):
+        dry = cfg.dry_run if req.dry_run is None else req.dry_run
+        if not dry and not cfg.test_mode:
+            raise HTTPException(409, "Applying changes from the app is disabled for real school data. "
+                                     "Use a dry run, or the command line after the mapping is confirmed.")
         try:
             if req.file:
                 folder = Path(cfg.watch_folder).resolve()
@@ -153,7 +159,7 @@ def create_app(cfg: Config, *, start_watcher: bool = True) -> FastAPI:
     def students(search: str | None = None, std: str | None = None, medium: str | None = None,
                  section: str | None = None,
                  fee_status: Literal["due", "no_balance_in_excel", "unknown"] | None = None,
-                 include_missing: bool = False,
+                 include_missing: bool = False, sort: Literal["class", "balance"] = "class",
                  page: int = Query(1, ge=1), page_size: int = Query(25, ge=1, le=100), conn=Depends(db)):
         where, p = ["TRUE"], {"std_order": STD_ORDER}
         if search:
@@ -182,7 +188,8 @@ def create_app(cfg: Config, *, start_watcher: bool = True) -> FastAPI:
                        lc.called_at AS last_call_at, lc.outcome AS last_outcome, lc.follow_up_date
                 {base.replace('WHERE', '''LEFT JOIN LATERAL (SELECT called_at, outcome, follow_up_date FROM calls c
                      WHERE c.student_id = s.id ORDER BY called_at DESC LIMIT 1) lc ON TRUE WHERE''', 1)}
-                ORDER BY {ORDER_SQL} LIMIT %(lim)s OFFSET %(off)s""",
+                ORDER BY {"f.balance DESC NULLS LAST, " if sort == "balance" else ""}{ORDER_SQL}
+                LIMIT %(lim)s OFFSET %(off)s""",
             {**p, "lim": page_size, "off": (page - 1) * page_size}).fetchall()
         return _page(items, total, page, page_size)
 
@@ -217,6 +224,21 @@ def create_app(cfg: Config, *, start_watcher: bool = True) -> FastAPI:
         rev = conn.execute("SELECT count(*) AS n FROM review_items WHERE status='pending'").fetchone()["n"]
         return {**t, **c, "follow_ups_today": fu["due_today"], "follow_ups_overdue": fu["overdue"],
                 "pending_reviews": rev, "last_sync": last}
+
+    @app.get("/classes")
+    def classes(conn=Depends(db)):
+        """One row per medium/class/section for the dashboard and class filters."""
+        return conn.execute(
+            f"""SELECT s.medium, s.std, s.section, {KLASS_SQL} AS klass,
+                       count(*) AS students,
+                       count(*) FILTER (WHERE f.balance > 0) AS students_due,
+                       coalesce(sum(f.balance) FILTER (WHERE f.balance > 0), 0) AS pending_amount,
+                       count(*) FILTER (WHERE EXISTS (SELECT 1 FROM calls c WHERE c.student_id = s.id
+                                                       AND c.called_at::date = current_date)) AS called_today
+                FROM students s LEFT JOIN current_fees f ON f.student_id = s.id
+                WHERE s.missing_since IS NULL
+                GROUP BY s.medium, s.std, s.section
+                ORDER BY array_position(%(o)s::text[], s.std), s.medium, s.section""", {"o": STD_ORDER}).fetchall()
 
     @app.get("/call-next")
     def call_next(std: str | None = None, medium: str | None = None, section: str | None = None,
@@ -322,6 +344,14 @@ def create_app(cfg: Config, *, start_watcher: bool = True) -> FastAPI:
             f"""SELECT m.*, s.name, {KLASS_SQL} AS klass FROM messages m JOIN students s ON s.id=m.student_id
                 ORDER BY m.id DESC LIMIT %s OFFSET %s""", (page_size, (page - 1) * page_size)).fetchall()
         return _page(items, total, page, page_size)
+
+    web = Path(__file__).resolve().parent.parent / "web"
+    if web.is_dir():
+        app.mount("/app", StaticFiles(directory=web, html=True), name="app")
+
+        @app.get("/", include_in_schema=False)
+        def home():
+            return RedirectResponse("/app/")
 
     return app
 

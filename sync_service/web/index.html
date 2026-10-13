@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Fees Calling Desk</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Baloo+2:wght@600;700&family=Nunito:wght@400;600;700;800&display=swap">
+<link rel="stylesheet" href="app.css">
+</head>
+<body>
+<div class="shell">
+  <aside class="side" id="side">
+    <div class="brand"><span class="logo" aria-hidden="true">₹</span><div><b>Fees Calling Desk</b><small>SchoolOps</small></div></div>
+    <nav id="nav">
+      <a href="#dashboard" data-page="dashboard">Dashboard</a>
+      <a href="#students" data-page="students">Students</a>
+      <a href="#fees" data-page="fees">Fee Collection</a>
+      <a href="#calls" data-page="calls">Call History</a>
+      <a href="#messages" data-page="messages">Messages</a>
+      <a href="#sync" data-page="sync">Excel Sync <span class="badge" id="reviewBadge" hidden></span></a>
+    </nav>
+    <div class="side-foot">
+      <label for="caller">Your name</label>
+      <input id="caller" placeholder="Type once" autocomplete="name">
+      <p class="mode" id="modeNote"></p>
+    </div>
+  </aside>
+  <div class="mainwrap">
+    <header class="topbar">
+      <button class="menu" id="menuBtn" aria-label="Open menu" aria-expanded="false">☰</button>
+      <h1 id="pageTitle">Dashboard</h1>
+    </header>
+    <main id="main" tabindex="-1"></main>
+  </div>
+</div>
+<div class="scrim" id="scrim" hidden></div>
+<aside class="drawer" id="drawer" hidden aria-label="Student details"></aside>
+<div id="toast" aria-live="polite"></div>
+<script src="app.js"></script>
+</body>
+</html>

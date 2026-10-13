@@ -61,6 +61,22 @@ Every 30 min: full re-check of the folder (catches missed saves)
    - Files must be **.xlsx**. Old **.xls** files are rejected with a message (Save As .xlsx in Excel/WPS).
    - If the folder is on a network drive, set `polling = true`.
 
+## Teacher app (Fees Calling Desk)
+
+`serve` also hosts the teacher app at **http://127.0.0.1:8000/** (white theme, sidebar, works on phones).
+
+| Page | What teachers do there |
+|---|---|
+| Dashboard | Summary cards, **Call next parent** with the 8 one-tap results (Will pay, Gave a date, Says already paid, Call later, No answer, Phone off, Wrong number, Has a complaint), Undo, follow-ups today/overdue, each class's progress against a daily target |
+| Students | Search by name/phone/Sr. No., filter by medium, class (Nursery–10), section and fee status, 25 per page. Click a student for details, fee history, call history and a call form |
+| Fee Collection | Students with fees due, highest balance first, with the date the Excel amount was read |
+| Call History | Every call with filters, pages, and **Copy for Excel** |
+| Messages | English / हिन्दी / मराठी previews with Copy. "Save as test message" stores a log entry only; nothing is sent |
+| Excel Sync | Status, **Check the folder now (dry run)**, changes to check (approve/reject in plain words), recent syncs with problems per row |
+
+The app can never write real school data: its sync button is always a dry run, and the API refuses
+`dry_run=false` unless the service is in synthetic test mode.
+
 ## Commands
 
 | Command | What it does |
@@ -93,7 +109,7 @@ Review decisions:
 export TEST_DATABASE_URL=postgresql://postgres@localhost:5432/schoolops_test
 python -m pytest -q
 ```
-39 tests cover the reader, the sync rules, the watcher (native events and polling), and the API.
+41 tests cover the reader, the sync rules, the watcher (native events and polling), and the API.
 All test data is synthetic.
 
 ## Logs
