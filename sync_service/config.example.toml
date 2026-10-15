@@ -33,7 +33,7 @@ student_name = "Student Name"
 class_label = "Class"
 contact = "Contact"
 total_fee = "Total Amt"
-discount = "Disc. Amt"
+discount = ["Disc. Amt", "Disc. Amount"]   # several accepted headings are allowed
 paid = "Paid Amt"
 balance = "Balance"
 
@@ -52,6 +52,7 @@ regex = '^\S+\s+(.+)$'
 [classification.medium]
 from = "file"
 regex = '^(Semi-English|English)'
+# If every file is the same medium, use this instead of from/regex:  value = "English"
 
 [payment_rules]
 # TODO: agree with the school. Until confirmed = true, both of these are forced to "review".
@@ -74,8 +75,10 @@ poll_minutes = 10
 token_cache = "data/onedrive_token.json"   # git-ignored, readable only by you
 
 [messaging]
-# No SMS/WhatsApp/email provider is connected. Drafts are prepared for staff to edit, approve and copy.
+# MASTER SWITCH for real WhatsApp/SMS. Keep false until every step in README "Go live" is done.
+# In test_mode (synthetic data) nothing is ever sent - a simulated provider is used instead.
 enabled = false
+send_delay_seconds = 1.0        # pause between messages during Send All
 # Optional: names of your approved WhatsApp templates / DLT-registered SMS templates, shown on drafts.
 # whatsapp_templates = { mr = "fee_reminder_mr", hi = "fee_reminder_hi", en = "fee_reminder_en" }
 # sms_templates = { mr = "1107xxxxxxxxxxxxxx", hi = "", en = "" }
@@ -85,3 +88,25 @@ auto_drafts_time = "09:00"
 auto_drafts_lists = ["missed_promise", "due_soon"]   # also: due_today, not_called, all_unpaid
 auto_drafts_channels = ["whatsapp", "sms"]
 auto_drafts_language = "mr"
+
+[whatsapp]
+# WhatsApp Business Cloud API (Meta). Secrets go in environment variables, never in this file:
+#   WHATSAPP_ACCESS_TOKEN  (permanent System User token)
+#   WHATSAPP_APP_SECRET    (to check delivery-status webhooks)
+#   WHATSAPP_VERIFY_TOKEN  (any random text; the same text is typed in Meta's webhook settings)
+enabled = false
+phone_number_id = ""            # TODO: from Meta > WhatsApp > API Setup
+api_version = "v23.0"
+
+[sms]
+# MSG91 (India, DLT). Secrets in environment variables: MSG91_AUTHKEY, MSG91_WEBHOOK_TOKEN
+enabled = false
+provider = "msg91"
+sender_id = ""                  # TODO: your 6-letter DLT header, e.g. "SCHOOL"
+route = "4"                     # transactional
+# template_field = "flow_id"    # only for older MSG91 accounts
+
+[ai]
+# AI writes reminder WORDING only (with {children} {total} {school}); it never sees student data.
+# Secret in environment variable: ANTHROPIC_API_KEY
+model = "claude-sonnet-5-5"

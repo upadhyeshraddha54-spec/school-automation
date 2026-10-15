@@ -54,6 +54,8 @@ class FakeGraph:
             return httpx.Response(401)
         assert request.headers["authorization"] == "Bearer TEST"
         path = request.url.path
+        if path.endswith("/me"):
+            return httpx.Response(200, json={"displayName": "Test Office", "userPrincipalName": "office@test.example"})
         parent = "root" if path.endswith("root:/School/Fees:/children") else path.split("/items/")[1].split("/")[0]
         kids = [self._json(i) for i in self.items.values() if i["parent"] == parent]
         skip = int(parse_qs(request.url.query.decode()).get("skip", ["0"])[0])
@@ -199,3 +201,16 @@ def test_folder_url_variants():
     assert "/drives/D9/items/X1/children" in folder_children_url(OneDriveConfig(drive_id="D9", folder_item_id="X1"))
     with pytest.raises(ValueError):
         OneDriveConfig.from_raw({"folder_item_id": "X"})
+
+
+def test_verify_reports_account_and_headings_only(conn, cfg, setup):
+    from schoolops_sync.onedrive import status, verify
+    g, oc, client, mirror, _ = setup
+    assert status(conn, cfg, oc)["verified"] is None  # never "live" before a real check
+    res = verify(conn, cfg, oc, client(), sample=2)
+    assert res["account"] == "office@test.example" and res["excel_files"] == 5 and res["sampled"] == 2
+    assert "student_name" in res["inspection"]["mapping"]
+    assert count(conn, "students") == 0  # verifying never syncs
+    assert list(mirror.glob("*.xlsx")) == []
+    assert all(m == "GET" for m, _ in g.requests)
+    assert status(conn, cfg, oc)["verified"]["account"] == "office@test.example"

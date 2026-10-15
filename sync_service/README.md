@@ -3,7 +3,9 @@
 For **one office staff member** who follows up unpaid school fees by phone. The office keeps
 editing its class-wise Excel workbooks as before. This app reads them (never writes to them), shows
 who to call today, records what each parent said, schedules the next follow-up, and prepares reminder
-drafts in English, हिन्दी and मराठी. **No calls or messages are made automatically.**
+drafts in English, हिन्दी and मराठी. It can also send WhatsApp/SMS fee reminders – **only** to students
+the teacher switched on, only with approved wording, and only after the teacher types the number of
+messages to confirm. Real sending is off until every step in "Go live" below is done.
 
 ```
 Excel class files (OneDrive folder, synced to the Mac)
@@ -38,7 +40,7 @@ class files (`synthetic_school/`) and `local.toml` (test mode). In the app: **St
 | **Dashboard** | Summary (pending fees, parents called today vs. daily target, missed promises, follow-ups due, office actions, Excel changes to check). **Fee campaign** (e.g. start of year): scope by medium/class/section, daily target, progress (parents contacted, amount collected and students cleared according to Excel). **Call next parent**: one entry per parent, siblings together, in priority order: *missed promise → due today → not called yet → no reply for a week*. Up-next list, skip, search and class/medium/section filters. **Follow-ups**: Missed / Today / Upcoming / Office. Per-class progress. |
 | **Students & Fees** | **+ Add Excel** (several files → preview, column check, problems, planned changes → confirm → import). Searchable, paginated table with filters (medium, class Nursery–10, section, fee status, follow-up status). Student view: fees, fee history, call and follow-up history, siblings. **Parent view**: every child's class, total/paid/balance and next step, combined total (each child counted once), one call for several children, link/separate siblings. **Excel sync & review**: status, dry-run check, current problems per file/row, "Changes to check", recent syncs. |
 | **Call Records** | Every call with filters (incl. result), siblings covered by the same call, Copy for Excel. |
-| **Messages** | Pick a parent → tick children → language → draft (one combined message for siblings) → edit → approve → copy. Drafts list with status. Sending is off. |
+| **Messages** | *Automatic reminders*: approved wording, per-student on/off (or all), check → type the count → send, status of every message. *Drafts to copy*: one parent or a whole list, edit, approve, copy (never sent). |
 
 ### Call results and what happens next
 | Result | Next follow-up (one open follow-up per child, never duplicated) |
@@ -82,6 +84,12 @@ it covered and restores the previous follow-up.
 | `SCHOOLOPS_WATCH_FOLDER` | Folder with the class files, overrides `watch_folder` | from config |
 | `TEST_DATABASE_URL` | Separate database for `pytest` | `postgresql://postgres@localhost:5433/schoolops_test` |
 | `ONEDRIVE_CLIENT_SECRET` | Only for `auth = "client_credentials"` | – |
+| `WHATSAPP_ACCESS_TOKEN` | Meta permanent System User token (WhatsApp sending) | – |
+| `WHATSAPP_APP_SECRET` | Meta app secret (checks delivery-status webhooks) | – |
+| `WHATSAPP_VERIFY_TOKEN` | Any random text; same text typed in Meta's webhook settings | – |
+| `MSG91_AUTHKEY` | MSG91 auth key (SMS sending) | – |
+| `MSG91_WEBHOOK_TOKEN` | Any random text; added as `?token=` to the MSG91 delivery-report URL | – |
+| `ANTHROPIC_API_KEY` | Claude API key – only for "Write with AI" (wording only, no student data) | – |
 
 No secrets are needed for the local Mac setup (Homebrew PostgreSQL uses your Mac user, local socket only).
 If you set a database password, put it in `DATABASE_URL` or in a `.env`/`config.toml` that is **not committed**
@@ -116,14 +124,65 @@ One-time setup (needs a Microsoft 365 admin, ~10 minutes):
 (App-only access without a user: `auth = "client_credentials"`, an application permission
 `Files.Read.All`, admin consent, and the secret in the `ONEDRIVE_CLIENT_SECRET` environment variable.)
 
-### WhatsApp and SMS reminder drafts (never sent)
-*Messages → Prepare reminders for a whole list*: missed promises, due today, promised in the next 3 days,
-not contacted yet, or all unpaid. One draft per parent per channel per day (siblings combined), using
-only amounts from Excel. SMS drafts show their length and number of SMS parts (Hindi/Marathi use
-70 characters per part). Staff edit, approve one or many, and copy. `POST /drafts/{id}/send` always refuses:
-no provider is connected. Real sending later needs a WhatsApp Business (Cloud API) account with approved
-templates and/or a DLT-registered SMS sender and templates — put their names in `[messaging]`.
-The same follow-up list can be downloaded as a spreadsheet from the Dashboard ("Download today's list").
+### Messages tab
+* **Automatic reminders** (new):
+  1. *Reminder wording* – per channel and language, "Write with AI" or "Use standard wording", edit, then
+     **Approve** with the Meta template name / MSG91 template id. Wording must contain `{children}`, `{total}`
+     and `{school}` once each and no numbers, amounts, dates or links (the app fills in real values). The AI
+     is sent only the instructions – never names, phones or amounts. The text to register with Meta
+     (`{{1}}` style) and DLT (`{#var#}` style) is shown under each wording.
+  2. *Who gets reminders* – a switch per student, plus **Enable all shown / Disable all shown** for the
+     current filter. Everyone starts **off**.
+  3. *Send reminders* – "Check who will get it" shows the count, an example and who is left out (no
+     approved wording, no valid mobile, already sent today, provider not ready). **Send** opens a box where
+     the teacher must type that number. Siblings get one combined message.
+  4. *Sent messages* – status per message (Accepted → Sent → Delivered → Read, or Failed with the reason),
+     "Try again" for failures.
+  Duplicate protection: one live message per parent per channel per day is enforced by the database,
+  so a second Send All, an old preview or a double click cannot send twice. Status updates never go
+  backwards. In test mode every send is simulated.
+* **Drafts to copy** (as before): prepare drafts for follow-up lists or one parent, edit, approve, copy.
+  These are never sent by the app.
+
+### Go live – what YOU must provide (nothing below has been tested against real accounts yet)
+**A. Excel mapping (first, on your Mac)**
+1. `python -m schoolops_sync inspect-excel "<folder with the real class files>"` – prints only headings and
+   counts (no student data) and a suggested `[columns]` block. Copy it into `config.toml`.
+2. Tell us what "2500", the blank-heading column and "old fees pending" mean – they stay unmapped until then.
+3. Confirm the payment rules, then set `mapping_confirmed = true` and run `check`.
+
+**B. OneDrive (Microsoft Graph, read-only)** – the steps in the OneDrive section above, then
+`onedrive-login` and `onedrive-verify`. The app shows OneDrive as verified only after `onedrive-verify`
+succeeded with your account.
+
+**C. WhatsApp Business Cloud API (Meta)**
+1. A Meta Business account (business verification recommended – needed for higher sending limits).
+2. A WhatsApp Business Account + a phone number that is **not** used in the WhatsApp phone app.
+3. From *WhatsApp → API Setup*: the **Phone number ID** → `[whatsapp] phone_number_id`.
+4. A **permanent System User access token** with `whatsapp_business_messaging` → `WHATSAPP_ACCESS_TOKEN`.
+5. Create message templates (category *Utility*) in English/Hindi/Marathi using the "Text to register
+   with Meta" shown in the app, wait for approval, then type each template name when approving in the app.
+6. Parents must have agreed to receive WhatsApp messages from the school (opt-in).
+7. Delivery status: a public **HTTPS** address for `/webhooks/whatsapp` (e.g. a Cloudflare Tunnel to the Mac),
+   the **App secret** → `WHATSAPP_APP_SECRET`, any random text → `WHATSAPP_VERIFY_TOKEN` (and the same text
+   in Meta's webhook settings), subscribe to the `messages` field. Without this, messages stay "Accepted".
+
+**D. SMS – MSG91 (India)**
+1. **DLT registration** on a DLT portal (e.g. Jio/Vi/Airtel): principal entity ID, a 6-letter **header**
+   (sender ID), and **content templates** (transactional/service) – register the "Text to register with DLT".
+2. An MSG91 account; add the DLT entity, header and templates there; MSG91 gives a **template id** per
+   template – type it when approving the wording in the app.
+3. MSG91 **auth key** → `MSG91_AUTHKEY`; header → `[sms] sender_id`.
+4. Delivery reports: MSG91 webhook to `https://<your address>/webhooks/msg91?token=<MSG91_WEBHOOK_TOKEN>`.
+
+**E. AI wording (optional)** – an Anthropic API key → `ANTHROPIC_API_KEY`. Without it use the standard wording.
+
+**F. Switch on and prove it**
+1. In `config.toml`: `[messaging] enabled = true`, `[whatsapp] enabled = true` and/or `[sms] enabled = true`.
+2. `python -m schoolops_sync messaging-check --channel whatsapp` (read-only check of the number).
+3. `python -m schoolops_sync send-test --channel whatsapp --to <your own mobile>` and the same for `sms`
+   – one message with sample values to **your own** phone. Only after that arrives is the channel live.
+4. Start with a small class: switch on a few students, Check, Send, watch *Sent messages*.
 
 ### Payments
 Payments are only learned from Excel: when Paid goes up (or, without other changes, Balance goes down).
@@ -158,6 +217,10 @@ A bigger discount is not a payment. Campaign "collected" totals use these paymen
 | `serve [--no-watch] [--port N]` | Start the app/API (and the watcher or OneDrive poller unless `--no-watch`) |
 | `onedrive-login` | Sign in to Microsoft once (device code, read-only) |
 | `onedrive-sync [--apply]` | Download changed files from OneDrive and sync them (dry run unless `--apply`) |
+| `onedrive-verify` | Prove the live OneDrive connection: account, folder, a few files (headings only); syncs nothing |
+| `inspect-excel FOLDER [--write FILE]` | Suggest the column mapping from real files (headings/counts only) |
+| `messaging-check --channel whatsapp\|sms` | Read-only provider check (needs the switches and keys) |
+| `send-test --channel C --to MOBILE [--lang mr]` | Send one approved reminder with sample values to your own phone |
 
 ## Backup and recovery
 ```bash
@@ -178,10 +241,11 @@ source of truth for fees; calls, follow-ups and drafts exist only in the databas
 Tests use synthetic data only and cover: reading/validation (incl. real .xls), repeated and changed
 syncs, duplicates, renamed/moved files, sub-folders, review decisions, siblings and families, separate
 and combined balances, call outcomes and follow-up scheduling, missed promises, payments seen in Excel,
-undo, campaigns and targets, message drafts and approval, uploads, the watcher, and the API.
+undo, campaigns and targets, message drafts and approval, uploads, the watcher, and the API; the mapping
+inspector; OneDrive verification; reminder switches, wording checks, AI calls (mocked, checked to carry no
+student data), confirmed Send All, duplicate prevention, WhatsApp/MSG91 request formats and webhooks (mocked).
 
-## Not built yet (needs your decision or credentials)
-* Real SMS/WhatsApp sending: needs provider accounts and approved templates; `[messaging] enabled` stays `false`
-  and the send endpoint refuses regardless.
-* Live Microsoft sign-in has not been tested against a real tenant (tests use a fake Graph server).
+## Not verified yet (needs your accounts)
+* Live Microsoft sign-in, live WhatsApp and live MSG91 have **not** been tested against real accounts – tests use
+  fake servers. Each becomes "live" only after `onedrive-verify`, `messaging-check` and `send-test` succeed for you.
 * Real column mapping and payment rules (need the school's confirmation).

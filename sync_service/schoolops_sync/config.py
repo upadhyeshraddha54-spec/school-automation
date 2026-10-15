@@ -42,7 +42,7 @@ class NotAllowed(Exception):
 
 @dataclass
 class Classifier:
-    source: str  # "file" | "sheet" | "class_column"
+    source: str  # "file" | "sheet" | "class_column" | "value" (a fixed value, e.g. the whole school is English medium)
     regex: str
 
 
@@ -60,13 +60,15 @@ class Config:
     messaging_enabled: bool = False  # real sending needs a provider; none is built in
     onedrive: dict = field(default_factory=dict)   # raw [onedrive] table (see onedrive.OneDriveConfig)
     messaging: dict = field(default_factory=dict)  # raw [messaging] table (templates, auto drafts)
+    raw: dict = field(default_factory=dict)        # whole config file (provider sections: [whatsapp], [sms], [ai])
     polling: bool = False  # true for network/shared drives where file events are unreliable
     school_name: str = "School"
     header_row: int = 2
     first_data_row: int = 3
     mapping_confirmed: bool = False
     test_mode: bool = False
-    columns: dict[str, str] = field(default_factory=dict)
+    columns: dict[str, str] = field(default_factory=dict)          # field -> heading shown to staff
+    column_alts: dict[str, list[str]] = field(default_factory=dict)  # field -> all accepted headings
     std: Classifier | None = None
     section: Classifier | None = None
     medium: Classifier | None = None
@@ -75,6 +77,9 @@ class Config:
     paid_decrease: str = "review"
 
     # ---- safety -------------------------------------------------------
+    def headings(self, fld: str) -> list[str]:
+        return self.column_alts.get(fld) or ([self.columns[fld]] if fld in self.columns else [])
+
     def rule(self, name: str) -> str:
         """Payment rules only take effect once confirmed; until then everything
         that could look like money moving backwards goes to review."""
@@ -102,9 +107,11 @@ class Config:
 def _classifier(raw: dict | None, name: str) -> Classifier | None:
     if not raw:
         return None
+    if raw.get("value"):
+        return Classifier(source="value", regex=str(raw["value"]))
     src = raw.get("from", "")
     if src not in ("file", "sheet", "class_column"):
-        raise ConfigError(f"classification.{name}.from must be file, sheet or class_column")
+        raise ConfigError(f"classification.{name}.from must be file, sheet or class_column (or give value = ...)")
     if not raw.get("regex"):
         raise ConfigError(f"classification.{name}.regex is required")
     return Classifier(source=src, regex=raw["regex"])
@@ -114,7 +121,13 @@ def load_config(path: str | os.PathLike) -> Config:
     with open(path, "rb") as fh:
         raw = tomllib.load(fh)
     svc, layout = raw.get("service", {}), raw.get("layout", {})
-    cols = {k: str(v).strip() for k, v in raw.get("columns", {}).items() if str(v).strip()}
+    # a column may list several accepted headings, e.g. discount = ["Disc. Amt", "Disc. Amount"]
+    alts = {}
+    for k, v in raw.get("columns", {}).items():
+        vals = [str(x).strip() for x in (v if isinstance(v, list) else [v]) if str(x).strip()]
+        if vals:
+            alts[k] = vals
+    cols = {k: v[0] for k, v in alts.items()}
     unknown = set(cols) - set(KNOWN_FIELDS)
     if unknown:
         raise ConfigError(f"Unknown column fields in [columns]: {sorted(unknown)}")
@@ -140,12 +153,14 @@ def load_config(path: str | os.PathLike) -> Config:
         messaging_enabled=bool(raw.get("messaging", {}).get("enabled", False)),
         onedrive=dict(raw.get("onedrive", {})),
         messaging=dict(raw.get("messaging", {})),
+        raw=raw,
         school_name=svc.get("school_name", "School"),
         header_row=int(layout.get("header_row", 2)),
         first_data_row=int(layout.get("first_data_row", 3)),
         mapping_confirmed=bool(layout.get("mapping_confirmed", False)),
         test_mode=bool(layout.get("test_mode", False)),
         columns=cols,
+        column_alts=alts,
         std=_classifier(cls.get("std"), "std"),
         section=_classifier(cls.get("section"), "section"),
         medium=_classifier(cls.get("medium"), "medium"),

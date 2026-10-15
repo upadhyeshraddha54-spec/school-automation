@@ -84,11 +84,11 @@ def _columns(path: Path, cfg: Config) -> list[dict]:
             sheets[ws.title] = {norm_key(h) for h in (rows[0] if rows else ()) if h is not None}
     finally:
         wb.close()
-    expected = {norm_key(v) for v in cfg.columns.values()}
+    expected = {norm_key(h) for f in cfg.columns for h in cfg.headings(f)}
     class_sheets = [s for s, hs in sheets.items() if hs & expected]
     out = []
     for field, heading in cfg.columns.items():
-        missing = [s for s in class_sheets if norm_key(heading) not in sheets[s]]
+        missing = [s for s in class_sheets if not ({norm_key(h) for h in cfg.headings(field)} & sheets[s])]
         out.append({"field": field, "heading": heading, "ok": bool(class_sheets) and not missing, "missing_in": missing})
     return out
 

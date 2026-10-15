@@ -215,9 +215,63 @@ ALTER TABLE message_drafts ADD COLUMN IF NOT EXISTS created_on DATE NOT NULL DEF
 -- at most one live WhatsApp and one live SMS draft per parent per day
 CREATE UNIQUE INDEX IF NOT EXISTS drafts_one_per_family_day ON message_drafts (family_id, channel, created_on)
     WHERE status <> 'discarded' AND channel IN ('whatsapp', 'sms') AND family_id IS NOT NULL;
+
+-- Automatic reminders: the teacher decides per student
+ALTER TABLE students ADD COLUMN IF NOT EXISTS reminders_enabled BOOLEAN NOT NULL DEFAULT FALSE;
+ALTER TABLE students ADD COLUMN IF NOT EXISTS reminders_changed_at TIMESTAMPTZ;
+ALTER TABLE students ADD COLUMN IF NOT EXISTS reminders_changed_by TEXT;
+
+-- Reminder wording per channel + language (AI-suggested or typed), approved by staff.
+-- provider_template = the Meta template name (WhatsApp) or MSG91 template id (DLT-approved SMS).
+CREATE TABLE IF NOT EXISTS message_templates (
+    id                 BIGSERIAL PRIMARY KEY,
+    channel            TEXT NOT NULL,           -- whatsapp | sms
+    lang               TEXT NOT NULL,           -- en | hi | mr
+    body               TEXT NOT NULL,           -- with {children} {total} {school}
+    source             TEXT NOT NULL,           -- ai | staff | builtin
+    status             TEXT NOT NULL DEFAULT 'draft',   -- draft | approved | retired
+    provider_template  TEXT,
+    provider_lang      TEXT,
+    created_at         TIMESTAMPTZ NOT NULL DEFAULT now(),
+    approved_at        TIMESTAMPTZ,
+    approved_by        TEXT
+);
+CREATE UNIQUE INDEX IF NOT EXISTS templates_one_approved ON message_templates (channel, lang) WHERE status = 'approved';
+
+CREATE TABLE IF NOT EXISTS outbound_messages (
+    id                   BIGSERIAL PRIMARY KEY,
+    batch_id             TEXT NOT NULL,
+    family_id            BIGINT REFERENCES families(id),
+    student_ids          BIGINT[] NOT NULL,
+    channel              TEXT NOT NULL,
+    phone                TEXT NOT NULL,
+    lang                 TEXT NOT NULL,
+    template_id          BIGINT REFERENCES message_templates(id),
+    variables            JSONB NOT NULL,
+    preview              TEXT NOT NULL,
+    status               TEXT NOT NULL DEFAULT 'queued', -- queued|sending|accepted|sent|delivered|read|failed|simulated|cancelled
+    provider             TEXT,
+    provider_message_id  TEXT UNIQUE,
+    error                TEXT,
+    created_on           DATE NOT NULL DEFAULT current_date,
+    created_at           TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at           TIMESTAMPTZ NOT NULL DEFAULT now(),
+    created_by           TEXT
+);
+-- never two live reminders to the same parent on the same channel on the same day
+CREATE UNIQUE INDEX IF NOT EXISTS outbound_one_per_family_day ON outbound_messages (family_id, channel, created_on)
+    WHERE status NOT IN ('failed', 'cancelled');
+CREATE TABLE IF NOT EXISTS message_events (
+    id           BIGSERIAL PRIMARY KEY,
+    outbound_id  BIGINT REFERENCES outbound_messages(id),
+    status       TEXT NOT NULL,
+    detail       TEXT,
+    raw          JSONB,
+    received_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+);
 """
 
-ALL_TABLES = ("payments", "onedrive_items", "message_drafts", "follow_ups", "campaigns", "settings", "messages", "calls", "review_items",
+ALL_TABLES = ("message_events", "outbound_messages", "message_templates", "payments", "onedrive_items", "message_drafts", "follow_ups", "campaigns", "settings", "messages", "calls", "review_items",
               "fee_snapshots", "file_state", "students", "families", "sync_issues", "sync_runs")
 
 

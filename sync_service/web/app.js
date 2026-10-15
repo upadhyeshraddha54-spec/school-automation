@@ -490,7 +490,7 @@ async function showRun(id) {
 
 /* ---------------- Add Excel: choose files -> check -> confirm -> import ---------------- */
 const imp = { token: null, files: [], picked: [] };
-function modal(html) { const m = $("#modal"); m.hidden = false; $("#scrim").hidden = false; m.innerHTML = `<div class="modal-box" role="dialog" aria-modal="true" aria-label="Add Excel">${html}</div>`; return m; }
+function modal(html, label = "Add Excel") { const m = $("#modal"); m.hidden = false; $("#scrim").hidden = false; m.innerHTML = `<div class="modal-box" role="dialog" aria-modal="true" aria-label="${esc(label)}">${html}</div>`; return m; }
 async function closeImport() {
   if (imp.token) { try { await api(`/imports/${imp.token}`, { method: "DELETE" }); } catch {} }
   imp.token = null; imp.files = []; imp.picked = [];
@@ -618,7 +618,11 @@ const msgState = { status: "", channel: "", page: 1, lang: store.get("fcd_lang",
 const CHANNEL = { whatsapp: '<span class="pill zero">WhatsApp</span>', sms: '<span class="pill blue">SMS</span>', manual: '<span class="pill grey">Copy</span>' };
 const STATUS_PILL = { draft: '<span class="pill blue">Draft</span>', approved: '<span class="pill zero">Approved</span>', discarded: '<span class="pill grey">Discarded</span>' };
 async function pageMessages(main, params) {
-  main.innerHTML = `<div class="note warn">Sending is turned off. WhatsApp and SMS reminders are prepared as drafts for you to check, edit, approve and copy. Nothing is sent by this app.</div>
+  const view = params.view === "drafts" || (params.view !== "auto" && (params.family || params.student)) ? "drafts" : "auto";
+  const seg = `<div class="panel-head"><div class="seg"><a class="btn small ${view === "auto" ? "main" : ""}" href="#messages?view=auto">Automatic reminders</a>
+    <a class="btn small ${view === "drafts" ? "main" : ""}" href="#messages?view=drafts">Drafts to copy</a></div></div>`;
+  if (view === "auto") { main.innerHTML = seg + '<div id="autoBox"></div>'; return pageReminders($("#autoBox")); }
+  main.innerHTML = seg + `<div class="note info">Drafts on this page are never sent by the app. Check, edit, approve and copy them. To send automatically, use <a href="#messages?view=auto">Automatic reminders</a>.</div>
     <section class="panel" id="bulkPanel"><h2>Prepare reminders for a whole list</h2>
       <div class="filters"><label>List<select id="bList"><option>Loading…</option></select></label>
         <label class="pick"><input type="checkbox" id="bWa" checked> WhatsApp</label><label class="pick"><input type="checkbox" id="bSms" checked> SMS</label>
@@ -736,6 +740,192 @@ async function pageMessages(main, params) {
   await loadDrafts();
 }
 
+// ------------------------------------------------------------------ automatic reminders
+const remState = { search: "", medium: "", std: "", section: "", only: "due", page: 1, page_size: 25, lang: store.get("fcd_lang", "mr"), wa: true, sms: false };
+const OUT_PILL = { simulated: '<span class="pill grey">Test only</span>', queued: '<span class="pill grey">Waiting</span>', sending: '<span class="pill grey">Sending</span>',
+  accepted: '<span class="pill blue">Accepted</span>', sent: '<span class="pill blue">Sent</span>', delivered: '<span class="pill zero">Delivered</span>',
+  read: '<span class="pill zero">Read</span>', failed: '<span class="pill due">Failed</span>', cancelled: '<span class="pill grey">Cancelled</span>' };
+const LANG_LABEL = (k) => META.languages[k] || k;
+function chanCard(name, c, testMode) {
+  const state = testMode ? '<span class="pill grey">Test mode – simulated</span>'
+    : c.ready ? (c.verified ? '<span class="pill zero">Connected &amp; checked</span>' : '<span class="pill amber">Set up – not checked yet</span>')
+    : '<span class="pill grey">Not connected</span>';
+  return `<div class="card"><span class="k"><b>${name}</b> ${state}</span>
+    <span class="k">Approved wording: ${c.approved_wording.length ? c.approved_wording.map(LANG_LABEL).join(", ") : "none yet"}</span>
+    ${!testMode && !c.ready ? `<span class="k muted">${esc(c.why_not || "")}</span>` : ""}
+    ${c.verified && c.verified.checked_at ? `<span class="k muted">Checked ${ftime(c.verified.checked_at)}${c.verified.verified_name ? " · " + esc(c.verified.verified_name) : ""}</span>` : ""}
+    ${!testMode && c.ready ? `<button class="btn small" data-verify="${name === "WhatsApp" ? "whatsapp" : "sms"}">Check connection</button>` : ""}</div>`;
+}
+async function pageReminders(box) {
+  const st = await api("/reminders/status");
+  box.innerHTML = `
+    ${st.test_mode ? '<div class="note info"><b>Test mode.</b> Synthetic students only. Send All is simulated: no WhatsApp or SMS leaves this computer.</div>'
+      : !st.real_sending_switch ? '<div class="note warn"><b>Real sending is switched off</b> in config.toml ([messaging] enabled = false). You can prepare everything; nothing can be sent yet.</div>' : ""}
+    <section class="cards" id="remCards"></section>
+    <section class="panel" id="tplPanel"><div class="panel-head"><h2>1. Reminder wording</h2></div>
+      <p class="muted small-note">The wording uses {children}, {total} and {school}; the app fills in each family's real names and amounts. The AI only writes wording – it never sees student data. WhatsApp and Indian SMS need this exact wording approved by Meta / DLT first.</p>
+      <div class="filters"><label>Channel<select id="tCh"><option value="whatsapp">WhatsApp</option><option value="sms">SMS</option></select></label>
+        <label>Language<select id="tLang">${Object.entries(META.languages).map(([k, v]) => `<option value="${k}" ${k === remState.lang ? "selected" : ""}>${esc(v)}</option>`).join("")}</select></label>
+        <button class="btn main" id="tAi" ${st.ai_ready ? "" : 'title="Set ANTHROPIC_API_KEY to use AI"'}>Write with AI</button>
+        <button class="btn" id="tStd">Use standard wording</button></div>
+      ${st.ai_ready ? "" : '<p class="muted small-note">AI is not set up (no ANTHROPIC_API_KEY). Use the standard wording and edit it.</p>'}
+      <div id="tplList"></div></section>
+    <section class="panel" id="whoPanel"><div class="panel-head"><h2>2. Who gets reminders</h2>
+      <div class="row-btns"><button class="btn good" id="enAll">Enable all shown</button><button class="btn" id="disAll">Disable all shown</button></div></div>
+      ${classFilters(remState, { search: true })}
+      <div class="filters">${selectHTML("only", "Show", [["due", "Fees due"], ["enabled", "Switched on"], ["disabled", "Switched off"]], remState.only, "Everyone")}</div>
+      <div id="whoList"></div></section>
+    <section class="panel" id="sendPanel"><h2>3. Send reminders</h2>
+      <div class="filters"><label class="pick"><input type="checkbox" id="sWa" ${remState.wa ? "checked" : ""}> WhatsApp</label>
+        <label class="pick"><input type="checkbox" id="sSms" ${remState.sms ? "checked" : ""}> SMS</label>
+        <label>Language<select id="sLang">${Object.entries(META.languages).map(([k, v]) => `<option value="${k}" ${k === remState.lang ? "selected" : ""}>${esc(v)}</option>`).join("")}</select></label>
+        <button class="btn main" id="sCheck">Check who will get it</button></div>
+      <p class="muted small-note">Only students switched on above who still owe fees. Brothers and sisters get one combined message. Never more than one message per parent per channel per day.</p>
+      <div id="sResult"></div></section>
+    <section class="panel" id="outPanel"><div class="panel-head"><h2>Sent messages</h2>
+      <div class="filters">${selectHTML("status", "Status", Object.keys(OUT_PILL).map((k) => [k, OUT_PILL[k].replace(/<[^>]+>/g, "")]), "")}</div></div>
+      <div id="outList"></div></section>`;
+
+  const cards = (st) => {
+    $("#remCards").innerHTML = `${chanCard("WhatsApp", st.whatsapp, st.test_mode)}${chanCard("SMS", st.sms, st.test_mode)}
+      <div class="card"><span class="v">${st.students.enabled_due}</span><span class="k">Students switched on who owe fees</span><span class="k muted">${st.students.enabled} switched on of ${st.students.total}</span></div>`;
+    $("#remCards").querySelectorAll("[data-verify]").forEach((b) => (b.onclick = async () => {
+      b.disabled = true;
+      try { await api(`/reminders/verify/${b.dataset.verify}`, { method: "POST" }); toast("Connection checked"); refreshCards(); } catch (e) { fail(e); b.disabled = false; }
+    }));
+  };
+  const refreshCards = () => api("/reminders/status").then(cards).catch(() => {});
+  cards(st);
+
+  // ---- wording
+  const loadTpl = async () => {
+    const ts = await api("/templates");
+    $("#tplList").innerHTML = ts.length ? ts.map((t) => `<div class="panel" style="gap:8px" data-tpl="${t.id}">
+      <div class="panel-head"><b>${t.channel === "sms" ? "SMS" : "WhatsApp"} · ${esc(LANG_LABEL(t.lang))}</b>
+        <span>${t.status === "approved" ? '<span class="pill zero">Approved – in use</span>' : '<span class="pill blue">Draft</span>'} <span class="muted">${{ ai: "AI", staff: "edited", builtin: "standard" }[t.source] || ""}</span></span></div>
+      <textarea lang="${esc(t.lang)}" ${t.status === "approved" ? "readonly" : ""}>${esc(t.body)}</textarea>
+      ${t.problems.length ? `<div class="note bad">${t.problems.map(esc).join("<br>")}</div>` : ""}
+      <details><summary>Text to register with ${t.channel === "sms" ? "DLT / MSG91" : "Meta"}</summary><pre style="white-space:pre-wrap">${esc(t.channel === "sms" ? t.dlt_template_text : t.whatsapp_template_text)}</pre>
+        <p class="muted small-note">Variables in order: ${t.variable_order.map((v) => `{${v}}`).join(", ")}</p></details>
+      ${t.status === "approved" ? `<p class="muted" style="margin:0">${t.provider_template ? `${t.channel === "sms" ? "MSG91 template id" : "Meta template"}: <b>${esc(t.provider_template)}</b> · ` : ""}approved ${ftime(t.approved_at)}${t.approved_by ? " by " + esc(t.approved_by) : ""}</p>
+        <div class="row-btns"><button class="btn small" data-retire>Stop using</button></div>`
+      : `<div class="filters"><label style="flex:1">${t.channel === "sms" ? "MSG91 template id (DLT-approved)" : "Meta template name (approved)"}<input data-pt placeholder="${st.test_mode ? "optional in test mode" : t.channel === "sms" ? "e.g. 64f0c…" : "e.g. fee_reminder_mr"}"></label>
+          ${t.channel === "whatsapp" ? `<label>Meta language code<input data-pl value="${esc(t.lang)}" size="6"></label>` : ""}</div>
+        <div class="row-btns"><button class="btn" data-save>Save changes</button><button class="btn main" data-approve>Approve</button><button class="btn" data-retire>Delete</button></div>`}</div>`).join("")
+      : '<p class="muted">No wording yet. Choose a channel and language, then “Write with AI” or “Use standard wording”.</p>';
+  };
+  $("#tplList").onclick = async (e) => {
+    const card = e.target.closest("[data-tpl]"); if (!card) return;
+    const id = card.dataset.tpl;
+    try {
+      if (e.target.matches("[data-save]")) { await api(`/templates/${id}`, { method: "PUT", body: { body: card.querySelector("textarea").value } }); toast("Saved"); }
+      else if (e.target.matches("[data-approve]")) {
+        const ta = card.querySelector("textarea");
+        if (ta.value !== ta.defaultValue) await api(`/templates/${id}`, { method: "PUT", body: { body: ta.value } });
+        await api(`/templates/${id}/approve`, { method: "POST", body: { provider_template: card.querySelector("[data-pt]").value, provider_lang: card.querySelector("[data-pl]")?.value || null, by: caller() } });
+        toast("Approved");
+      } else if (e.target.matches("[data-retire]")) { await api(`/templates/${id}/retire`, { method: "POST" }); toast("Removed"); }
+      else return;
+      loadTpl(); refreshCards();
+    } catch (er) { fail(er); }
+  };
+  const gen = async (builtin, btn) => {
+    remState.lang = $("#tLang").value; store.set("fcd_lang", remState.lang);
+    btn.disabled = true;
+    try { await api("/templates/generate", { method: "POST", body: { channel: $("#tCh").value, lang: remState.lang, use_builtin: builtin } }); toast("Wording ready – check it, then approve"); loadTpl(); }
+    catch (er) { fail(er); }
+    btn.disabled = false;
+  };
+  $("#tAi").onclick = (e) => gen(false, e.target);
+  $("#tStd").onclick = (e) => gen(true, e.target);
+
+  // ---- who gets reminders
+  const filt = () => ({ search: remState.search, medium: remState.medium, std: remState.std, section: remState.section });
+  const loadWho = async () => {
+    const d = await api("/reminders/students?" + qs({ ...filt(), only: remState.only === "" ? "all" : remState.only, page: remState.page, page_size: remState.page_size }));
+    const w = $("#whoList");
+    w.innerHTML = `<div class="tablewrap"><table><thead><tr><th>Reminders</th><th>Student</th><th>Class</th><th class="amt">Balance</th><th class="hide-sm">Phone</th><th class="hide-sm">Last message</th></tr></thead><tbody>
+      ${d.items.map((s) => `<tr><td><label class="pick"><input type="checkbox" data-en="${s.id}" ${s.reminders_enabled ? "checked" : ""} aria-label="Reminders for ${esc(s.name)}"> ${s.reminders_enabled ? "On" : "Off"}</label></td>
+        <td><b>${esc(s.name)}</b></td><td>${esc(s.klass)}</td><td class="amt">${rupee(s.balance)}</td><td class="hide-sm">${esc(s.contact || "–")}</td>
+        <td class="hide-sm">${s.last_status ? OUT_PILL[s.last_status] || esc(s.last_status) : '<span class="muted">–</span>'}</td></tr>`).join("") || '<tr><td colspan="6" class="empty">No students match.</td></tr>'}</tbody></table></div>`;
+    w.append(pager(d, (pg) => { remState.page = pg; loadWho().catch(fail); }));
+    remState.shown = d.total;
+  };
+  $("#whoList").onchange = async (e) => {
+    const c = e.target.closest("[data-en]"); if (!c) return;
+    try { await api("/reminders/enable", { method: "POST", body: { enabled: c.checked, student_ids: [+c.dataset.en], by: caller() } }); c.parentElement.lastChild.textContent = c.checked ? " On" : " Off"; refreshCards(); }
+    catch (er) { c.checked = !c.checked; fail(er); }
+  };
+  const bulk = async (enabled) => {
+    const where = [remState.medium, remState.std && stdName(remState.std), remState.section, remState.search && `“${remState.search}”`].filter(Boolean).join(" · ") || "ALL students";
+    const m = modal(`<h2>${enabled ? "Switch ON" : "Switch OFF"} reminders?</h2><p>For ${esc(where)} – ${remState.shown ?? ""} student${remState.shown === 1 ? "" : "s"} in this list.</p>
+      <div class="row-btns"><button class="btn" data-imp-close>Cancel</button><button class="btn main" id="bOk">${enabled ? "Switch on" : "Switch off"}</button></div>`, "Confirm");
+    m.querySelector("#bOk").onclick = async () => {
+      try { const r = await api("/reminders/enable", { method: "POST", body: { enabled, ...filt(), by: caller() } }); toast(`${r.changed} student${r.changed === 1 ? "" : "s"} switched ${enabled ? "on" : "off"}`); closeImport(); loadWho(); refreshCards(); }
+      catch (er) { fail(er); }
+    };
+  };
+  $("#enAll").onclick = () => bulk(true);
+  $("#disAll").onclick = () => bulk(false);
+  bindFilters($("#whoPanel"), remState, () => loadWho().catch(fail));
+
+  // ---- send
+  $("#sCheck").onclick = async (e) => {
+    remState.wa = $("#sWa").checked; remState.sms = $("#sSms").checked; remState.lang = $("#sLang").value; store.set("fcd_lang", remState.lang);
+    const channels = [remState.wa && "whatsapp", remState.sms && "sms"].filter(Boolean);
+    if (!channels.length) { toast("Tick WhatsApp and/or SMS", { bad: true }); return; }
+    e.target.disabled = true;
+    try {
+      const p = await api("/send/preview", { method: "POST", body: { channels, lang: remState.lang, ...filt() } });
+      $("#sResult").innerHTML = `<div class="note ${p.count ? "ok" : "warn"}"><b>${p.count} message${p.count === 1 ? "" : "s"} ready</b>
+          ${Object.entries(p.by_channel).map(([k, v]) => `${k === "sms" ? "SMS" : "WhatsApp"}: ${v}`).join(" · ")}${p.simulated ? " · <b>test mode: simulated</b>" : ""}
+          ${p.sample ? `<p class="muted" style="margin:6px 0 0">Example:</p><pre style="white-space:pre-wrap;margin:4px 0">${esc(p.sample)}</pre>` : ""}
+          ${p.skipped.length ? `<details><summary>${p.skipped.length} not included</summary><div class="list">${p.skipped.map((x) => `<div class="row"><span>${esc(x.name)} · ${x.channel === "sms" ? "SMS" : "WhatsApp"}</span><span class="muted">${esc(x.why)}</span></div>`).join("")}</div></details>` : ""}
+          ${p.count ? `<div class="row-btns"><button class="btn main" id="sGo">Send ${p.count} now…</button></div>` : ""}</div>`;
+      if (p.count) $("#sGo").onclick = () => confirmSend(p);
+    } catch (er) { fail(er); }
+    e.target.disabled = false;
+  };
+  const confirmSend = (p) => {
+    const m = modal(`<h2>Send ${p.count} reminder${p.count === 1 ? "" : "s"}?</h2>
+      <p>${p.simulated ? "Test mode: nothing really leaves this computer." : "These will really be sent to parents' phones. This cannot be undone."}</p>
+      <label>Type <b>${p.count}</b> to confirm<input id="cCount" inputmode="numeric" autocomplete="off"></label>
+      <div class="row-btns"><button class="btn" data-imp-close>Cancel</button><button class="btn main" id="cGo" disabled>Send</button></div><div id="cOut"></div>`, "Confirm sending");
+    const inp = m.querySelector("#cCount"); inp.focus();
+    inp.oninput = () => (m.querySelector("#cGo").disabled = inp.value.trim() !== String(p.count));
+    m.querySelector("#cGo").onclick = async (e) => {
+      e.target.disabled = true; e.target.textContent = "Sending…";
+      try {
+        const r = await api("/send/confirm", { method: "POST", body: { token: p.token, confirm_count: +inp.value, by: caller() } });
+        m.querySelector("#cOut").innerHTML = `<div class="note ok">Done. ${Object.entries(r.summary).map(([k, v]) => `${v} ${esc(OUT_PILL[k] ? OUT_PILL[k].replace(/<[^>]+>/g, "").toLowerCase() : k)}`).join(", ")}${r.duplicates_prevented ? ` · ${r.duplicates_prevented} already sent today (skipped)` : ""}</div>`;
+        e.target.hidden = true; m.querySelector("[data-imp-close]").textContent = "Close";
+        $("#sResult").innerHTML = ""; loadOut(); loadWho(); refreshCards();
+      } catch (er) { m.querySelector("#cOut").innerHTML = `<div class="note bad">${esc(er.message)}</div>`; e.target.textContent = "Send"; }
+    };
+  };
+
+  // ---- sent messages
+  const outState = { status: "", page: 1 };
+  const loadOut = async () => {
+    const d = await api("/outbound?" + qs({ status: outState.status, page: outState.page, page_size: 15 }));
+    const o = $("#outList");
+    o.innerHTML = `<p class="muted small-note">Today: ${Object.entries(d.today).map(([k, v]) => `${v} ${esc((OUT_PILL[k] || k).replace(/<[^>]+>/g, "").toLowerCase())}`).join(", ") || "nothing sent yet"}</p>
+      <div class="tablewrap"><table><thead><tr><th>When</th><th>Channel</th><th>Children</th><th class="hide-sm">To</th><th>Status</th><th></th></tr></thead><tbody>
+      ${d.items.map((x) => `<tr><td>${ftime(x.created_at)}</td><td>${CHANNEL[x.channel] || ""}</td><td>${esc(x.children || "")}<br><span class="muted">${esc(LANG_LABEL(x.lang))}</span></td>
+        <td class="hide-sm">${esc(x.phone)}</td><td>${OUT_PILL[x.status] || esc(x.status)}${x.error ? `<br><span class="muted">${esc(x.error)}</span>` : ""}</td>
+        <td>${x.status === "failed" ? `<button class="btn small" data-retry="${x.id}">Try again</button>` : ""}</td></tr>`).join("") || '<tr><td colspan="6" class="empty">No messages sent yet.</td></tr>'}</tbody></table></div>`;
+    o.append(pager(d, (pg) => { outState.page = pg; loadOut().catch(fail); }));
+  };
+  $("#outList").onclick = async (e) => {
+    const b = e.target.closest("[data-retry]"); if (!b) return;
+    b.disabled = true;
+    try { const r = await api(`/outbound/${b.dataset.retry}/retry?` + qs({ by: caller() }), { method: "POST" }); toast(r.status === "failed" ? "Failed again: " + (r.error || "") : "Sent again", { bad: r.status === "failed" }); loadOut(); }
+    catch (er) { fail(er); b.disabled = false; }
+  };
+  bindFilters($("#outPanel"), outState, () => loadOut().catch(fail));
+  await Promise.all([loadTpl(), loadWho(), loadOut()]);
+}
+
 // ------------------------------------------------------------------ router
 const PAGES = {
   dashboard: ["Dashboard", pageDashboard], students: ["Students & Fees", pageStudentsFees],
@@ -759,6 +949,7 @@ async function route(keepScroll = false) {
   fresh.innerHTML = `<p class="muted">Loading…</p>`;
   if (!keepScroll || current !== key) window.scrollTo(0, 0);
   current = key;
+  try { META = await api("/filters"); } catch {}  // classes appear right after the first Excel import
   try { await fn(fresh, params); } catch (e) { fresh.innerHTML = `<div class="note bad">${esc(e.message)}. Is the SchoolOps service running?</div>`; }
   refreshBadge();
 }
@@ -766,7 +957,7 @@ async function refreshBadge() {
   try {
     const st = await api("/sync/status");
     const b = $("#reviewBadge"); b.hidden = !st.pending_reviews; b.textContent = st.pending_reviews;
-    $("#modeNote").textContent = (st.test_mode ? "Test mode: synthetic students only. " : "") + "Messages are drafts; nothing is sent.";
+    $("#modeNote").textContent = (st.test_mode ? "Test mode: synthetic students only; messages are simulated, nothing is sent." : "Messages go out only after you confirm Send.");
   } catch {}
 }
 

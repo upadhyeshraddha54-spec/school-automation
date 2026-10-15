@@ -76,7 +76,7 @@ def test_edit_approve_discard_and_no_sending(client, conn):
     assert back["status"] == "draft" and back["approved_at"] is None  # edits need a new approval
     assert client.put(f"/drafts/{d['id']}", json={"body": "   "}).status_code == 409
     r = client.post(f"/drafts/{d['id']}/send")
-    assert r.status_code == 409 and "turned off" in r.json()["detail"]
+    assert r.status_code == 409 and "typed confirmation" in r.json()["detail"]
     client.post(f"/drafts/{d['id']}/discard")
     assert client.post(f"/drafts/{d['id']}/approve").status_code == 409
     lst = client.get("/drafts").json()

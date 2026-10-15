@@ -165,6 +165,8 @@ def _id_text(v: Any) -> str | None:
 def _classify(c: Classifier | None, file_stem: str, sheet: str, class_cell: Any) -> str | None:
     if c is None:
         return None
+    if c.source == "value":
+        return c.regex
     src = {"file": file_stem, "sheet": sheet, "class_column": norm_text(class_cell)}[c.source]
     m = re.search(c.regex, src, flags=re.I)
     if not m:
@@ -263,7 +265,7 @@ def _read_sheet(pf: ParsedFile, cfg: Config, stem: str, sheet: str, rows: list[t
     # above them), look in the first 8 rows for the row that has BOTH name and balance headings.
     def _has_core(row) -> bool:
         keys = {norm_key(h) for h in (row or ()) if h is not None}
-        return all(norm_key(cfg.columns[f]) in keys for f in ("student_name", "balance"))
+        return all(any(norm_key(h) in keys for h in cfg.headings(f)) for f in ("student_name", "balance"))
     if not (len(rows) > hidx and _has_core(rows[hidx])):
         for r in range(min(len(rows), 8)):
             if _has_core(rows[r]):
@@ -276,9 +278,10 @@ def _read_sheet(pf: ParsedFile, cfg: Config, stem: str, sheet: str, rows: list[t
     found: dict[str, int] = {}
     hnorm = [norm_key(h) for h in header]
     for fld, heading in cfg.columns.items():
-        hits = [i for i, h in enumerate(hnorm) if h and h == norm_key(heading)]
+        accepted = {norm_key(x) for x in cfg.headings(fld)}
+        hits = [i for i, h in enumerate(hnorm) if h and h in accepted]
         if len(hits) > 1:
-            pf.add("error", "duplicate_heading", f"Heading '{heading}' appears {len(hits)} times.", sheet)
+            pf.add("error", "duplicate_heading", f"Heading '{heading}' (or an accepted variant) appears {len(hits)} times.", sheet)
             pf.sheets_failed.append(sheet)
             return
         if hits:

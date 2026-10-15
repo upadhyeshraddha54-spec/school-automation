@@ -68,6 +68,28 @@ with sync_playwright() as p:
     pg.fill("#draftBody", body + "\nकार्यालय वेळ: 9 ते 1"); pg.click("#dApprove"); pg.wait_for_timeout(1200)
     log("draft status:", pg.inner_text("#msgEditor .panel-head"))
     pg.screenshot(path="browser-v2-messages.png", full_page=True)
+    # 6b. Automatic reminders (test mode: simulated, nothing leaves the computer)
+    pg.goto(B + "#messages"); pg.wait_for_timeout(1500)
+    log("auto status:", pg.inner_text(".cards").replace("\n", " | ")[:200])
+    for ch, lang in (("whatsapp", "mr"), ("sms", "mr")):
+        pg.select_option("#tCh", ch); pg.select_option("#tLang", lang); pg.click("#tStd"); pg.wait_for_timeout(800)
+        pg.locator("#tplList [data-approve]").first.click(); pg.wait_for_timeout(800)
+    log("approved wording:", pg.locator("#tplList .pill:has-text('Approved')").count())
+    pg.select_option("#whoPanel [data-f=std]", "1"); pg.wait_for_timeout(800)
+    pg.click("#enAll"); pg.click("#bOk"); pg.wait_for_timeout(1000)
+    log("switched on rows:", pg.locator("#whoList input[data-en]:checked").count(), "of", pg.locator("#whoList input[data-en]").count())
+    pg.locator("#whoList input[data-en]").first.uncheck(); pg.wait_for_timeout(600)
+    pg.check("#sSms"); pg.click("#sCheck"); pg.wait_for_timeout(1200)
+    log("preview:", pg.inner_text("#sResult").replace("\n", " | ")[:260])
+    pg.screenshot(path="browser-v2-reminders.png", full_page=True)
+    pg.click("#sGo"); n = pg.inner_text(".modal-box h2").split()[1]
+    log("send button disabled before typing:", pg.is_disabled("#cGo"))
+    pg.fill("#cCount", n); pg.click("#cGo"); pg.wait_for_selector("#cOut .note")
+    log("send result:", pg.inner_text("#cOut"))
+    pg.click("[data-imp-close]"); pg.wait_for_timeout(1000)
+    log("sent table rows:", pg.locator("#outList tbody tr").count(), "|", pg.inner_text("#outList .small-note"))
+    pg.click("#sCheck"); pg.wait_for_timeout(1200)
+    log("second check:", pg.inner_text("#sResult").replace("\n", " | ")[:120])
     # 7. Call records
     pg.goto(B + "#calls"); pg.wait_for_timeout(1000)
     log("call rows:", pg.locator("#callTable tbody tr").count(), "| sibling note:", "same call" in pg.inner_text("#callTable"))
@@ -78,7 +100,7 @@ with sync_playwright() as p:
     # phone width
     m = b.new_page(viewport={"width": 390, "height": 844})
     m.on("pageerror", lambda e: errs.append(str(e)))
-    for h in ["dashboard", "students", "students?view=sync", "calls", "messages"]:
+    for h in ["dashboard", "students", "students?view=sync", "calls", "messages", "messages?view=drafts"]:
         m.goto(B + "#" + h); m.wait_for_timeout(1200)
         wide = m.evaluate("""()=>{const W=innerWidth;return [...document.querySelectorAll('body *')].filter(e=>{const r=e.getBoundingClientRect();return r.right>W+1 && !e.closest('.tablewrap') && getComputedStyle(e).position!=='fixed' && !e.closest('.side')}).slice(0,3).map(e=>e.tagName+'.'+e.className)}""")
         log("phone", h, "too wide:", wide)

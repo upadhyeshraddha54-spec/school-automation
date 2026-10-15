@@ -9,18 +9,21 @@ from decimal import Decimal
 from pathlib import Path
 from typing import Literal
 
-from fastapi import Depends, FastAPI, File, HTTPException, Query, UploadFile
+from fastapi import Depends, FastAPI, File, HTTPException, Query, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import RedirectResponse, Response
+from fastapi.responses import PlainTextResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
 from psycopg.types.json import Jsonb
 from pydantic import BaseModel, Field
 
+from . import ai
 from . import drafts as dr
 from . import followups as fx
 from . import messages as msg
 from . import onedrive as od
 from . import outreach as ox
+from . import providers as pv
+from . import sender as sx
 from .config import Config, NotAllowed
 from .db import connect, init_db
 from .families import FamilyError, link_student, merge_families, unlink_student
@@ -123,8 +126,49 @@ class TargetIn(BaseModel):
     daily_target: int = Field(..., ge=1, le=1000)
 
 
+class ReminderToggle(BaseModel):
+    enabled: bool
+    student_ids: list[int] | None = Field(None, max_length=5000)
+    medium: str | None = None
+    std: str | None = None
+    section: str | None = None
+    search: str | None = None
+    by: str | None = None
+
+
+class TemplateGen(BaseModel):
+    channel: Literal["whatsapp", "sms"]
+    lang: Literal["en", "hi", "mr"]
+    tone: Literal["polite", "friendly", "formal"] = "polite"
+    use_builtin: bool = False
+
+
+class TemplateEdit(BaseModel):
+    body: str = Field(..., min_length=1, max_length=1000)
+
+
+class TemplateApprove(BaseModel):
+    provider_template: str | None = Field(None, max_length=200)
+    provider_lang: str | None = Field(None, max_length=20)
+    by: str | None = None
+
+
+class SendPreviewIn(BaseModel):
+    channels: list[Literal["whatsapp", "sms"]] = Field(..., min_length=1)
+    lang: Literal["en", "hi", "mr"] = "mr"
+    medium: str | None = None
+    std: str | None = None
+    section: str | None = None
+
+
+class SendConfirmIn(BaseModel):
+    token: str
+    confirm_count: int = Field(..., ge=0)
+    by: str | None = None
+
+
 def create_app(cfg: Config, *, start_watcher: bool = True, graph_client_factory=None) -> FastAPI:
-    state: dict = {"watcher": None, "poller": None, "auto": None}
+    state: dict = {"watcher": None, "poller": None, "auto": None, "providers": None, "ai_transport": None}
     oc = od.OneDriveConfig.from_raw(cfg.onedrive)
 
     def graph_client():
@@ -739,8 +783,210 @@ def create_app(cfg: Config, *, start_watcher: bool = True, graph_client_factory=
 
     @app.post("/drafts/{did}/send")
     def draft_send(did: int):
-        raise HTTPException(409, "Sending is turned off. WhatsApp and SMS drafts are for staff to review and copy; "
-                                 "no provider is connected and nothing is sent by this app.")
+        raise HTTPException(409, "Drafts are for staff to review and copy. Automatic sending happens only through "
+                                 "Automatic reminders (approved wording + typed confirmation).")
+
+    # ------------------------------------------------------------------ automatic reminders (WhatsApp / SMS)
+    def _filters(m):
+        return {k: getattr(m, k, None) for k in ("medium", "std", "section", "search")}
+
+    def channel_state(conn, ch):
+        conf = cfg.raw.get(ch, {})
+        try:
+            prov = pv.get_provider(cfg, ch)
+            ready, why = True, None
+        except pv.NotConfigured as exc:
+            prov, ready, why = None, False, str(exc)
+        v = setting(conn, f"{ch}_verified", None)
+        return {"switched_on": bool(conf.get("enabled")), "ready": ready, "why_not": why,
+                "provider": getattr(prov, "name", None), "verified": v,
+                "approved_wording": [r["lang"] for r in conn.execute(
+                    "SELECT lang FROM message_templates WHERE channel=%s AND status='approved' ORDER BY lang", (ch,))]}
+
+    @app.get("/reminders/status")
+    def reminders_status(conn=Depends(db)):
+        n = conn.execute("""SELECT count(*) FILTER (WHERE s.reminders_enabled) AS enabled,
+                                   count(*) FILTER (WHERE s.reminders_enabled AND f.balance > 0) AS enabled_due,
+                                   count(*) AS total
+                            FROM students s LEFT JOIN current_fees f ON f.student_id=s.id
+                            WHERE s.missing_since IS NULL""").fetchone()
+        return {"test_mode": bool(cfg.test_mode), "real_sending_switch": bool(cfg.messaging_enabled),
+                "mapping_confirmed": bool(cfg.mapping_confirmed),
+                "ai_ready": bool(__import__("os").environ.get("ANTHROPIC_API_KEY")),
+                "whatsapp": channel_state(conn, "whatsapp"), "sms": channel_state(conn, "sms"),
+                "onedrive_verified": od.status(conn, cfg, oc).get("verified"), "students": n}
+
+    @app.get("/reminders/students")
+    def reminders_students(search: str | None = None, std: str | None = None, medium: str | None = None,
+                           section: str | None = None, only: Literal["all", "enabled", "disabled", "due"] = "all",
+                           page: int = Query(1, ge=1), page_size: int = Query(25, ge=1, le=100), conn=Depends(db)):
+        where, p = sx._filters({"search": search, "std": std, "medium": medium, "section": section})
+        if only == "enabled":
+            where.append("s.reminders_enabled")
+        elif only == "disabled":
+            where.append("NOT s.reminders_enabled")
+        elif only == "due":
+            where.append("f.balance > 0")
+        w = " AND ".join(where)
+        total = conn.execute(f"SELECT count(*) AS n FROM students s LEFT JOIN current_fees f ON f.student_id=s.id WHERE {w}",
+                             p).fetchone()["n"]
+        items = conn.execute(
+            f"""SELECT s.id, s.name, s.contact, s.family_id, s.medium, s.std, s.section, s.sr_no, {KLASS_SQL} AS klass,
+                       f.balance, s.reminders_enabled, s.reminders_changed_at, s.reminders_changed_by,
+                       (SELECT o.status FROM outbound_messages o WHERE o.family_id = s.family_id
+                         ORDER BY o.id DESC LIMIT 1) AS last_status
+                FROM students s LEFT JOIN current_fees f ON f.student_id=s.id WHERE {w}
+                ORDER BY {ORDER_SQL} LIMIT %(lim)s OFFSET %(off)s""",
+            {**p, "std_order": list(STD_ORDER), "lim": page_size, "off": (page - 1) * page_size}).fetchall()
+        return _page(items, total, page, page_size)
+
+    @app.post("/reminders/enable")
+    def reminders_enable(req: ReminderToggle, conn=Depends(db)):
+        with conn.transaction():
+            n = sx.set_enabled(conn, req.enabled, req.by, student_ids=req.student_ids,
+                               filters=None if req.student_ids is not None else _filters(req))
+        return {"changed": n, "enabled": req.enabled}
+
+    @app.post("/reminders/verify/{channel}")
+    def reminders_verify(channel: Literal["whatsapp", "sms"], conn=Depends(db)):
+        """Read-only provider check (no message is sent). Stored so the status card can show it."""
+        try:
+            res = pv.get_provider(cfg, channel).verify()
+        except pv.ProviderError as exc:
+            bad(exc, 409)
+        if res.get("simulated"):
+            return {**res, "note": "Test mode: nothing real was checked."}
+        from datetime import datetime, timezone
+        res = {**res, "checked_at": datetime.now(timezone.utc).isoformat()}
+        conn.execute("""INSERT INTO settings (key, value) VALUES (%s, %s)
+                        ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value""", (f"{channel}_verified", Jsonb(res)))
+        return res
+
+    @app.get("/templates")
+    def templates_list(conn=Depends(db)):
+        rows = conn.execute("SELECT * FROM message_templates WHERE status <> 'retired' ORDER BY channel, lang, id DESC").fetchall()
+        return [{**r, **ai.provider_formats(r["body"]), "problems": ai.validate(r["body"], r["channel"])} for r in rows]
+
+    @app.post("/templates/generate", status_code=201)
+    def templates_generate(req: TemplateGen, conn=Depends(db)):
+        if req.use_builtin:
+            body, source = ai.BUILTIN[req.lang], "builtin"
+        else:
+            try:
+                body, source = ai.generate(cfg, req.channel, req.lang, req.tone, transport=state.get("ai_transport")), "ai"
+            except ai.AIError as exc:
+                bad(exc, 409)
+        row = conn.execute("""INSERT INTO message_templates (channel, lang, body, source) VALUES (%s,%s,%s,%s)
+                              RETURNING *""", (req.channel, req.lang, body, source)).fetchone()
+        return {**row, **ai.provider_formats(body), "problems": ai.validate(body, req.channel)}
+
+    @app.put("/templates/{tid}")
+    def templates_edit(tid: int, req: TemplateEdit, conn=Depends(db)):
+        t = conn.execute("SELECT * FROM message_templates WHERE id=%s", (tid,)).fetchone()
+        if not t:
+            raise HTTPException(404, "Wording not found")
+        if t["status"] != "draft":
+            raise HTTPException(409, "Approved wording can't be changed (it must match Meta/DLT). Make a new one instead.")
+        body = req.body.strip()
+        row = conn.execute("UPDATE message_templates SET body=%s, source='staff' WHERE id=%s RETURNING *",
+                           (body, tid)).fetchone()
+        return {**row, **ai.provider_formats(body), "problems": ai.validate(body, t["channel"])}
+
+    @app.post("/templates/{tid}/approve")
+    def templates_approve(tid: int, req: TemplateApprove, conn=Depends(db)):
+        t = conn.execute("SELECT * FROM message_templates WHERE id=%s", (tid,)).fetchone()
+        if not t or t["status"] != "draft":
+            raise HTTPException(409, "Only a draft can be approved.")
+        probs = ai.validate(t["body"], t["channel"])
+        if probs:
+            raise HTTPException(422, " ".join(probs))
+        if not cfg.test_mode and not (req.provider_template or "").strip():
+            raise HTTPException(422, "Enter the approved Meta template name (WhatsApp) or MSG91 template id (SMS).")
+        with conn.transaction():
+            conn.execute("""UPDATE message_templates SET status='retired' WHERE channel=%s AND lang=%s
+                            AND status='approved'""", (t["channel"], t["lang"]))
+            row = conn.execute("""UPDATE message_templates SET status='approved', provider_template=%s, provider_lang=%s,
+                                  approved_at=now(), approved_by=%s WHERE id=%s RETURNING *""",
+                               ((req.provider_template or "").strip() or None, (req.provider_lang or "").strip() or None,
+                                req.by, tid)).fetchone()
+        return row
+
+    @app.post("/templates/{tid}/retire")
+    def templates_retire(tid: int, conn=Depends(db)):
+        row = conn.execute("UPDATE message_templates SET status='retired' WHERE id=%s RETURNING *", (tid,)).fetchone()
+        if not row:
+            raise HTTPException(404, "Wording not found")
+        return row
+
+    @app.post("/send/preview")
+    def send_preview(req: SendPreviewIn, conn=Depends(db)):
+        return sx.preview(conn, cfg, list(dict.fromkeys(req.channels)), req.lang, _filters(req))
+
+    @app.post("/send/confirm")
+    def send_confirm(req: SendConfirmIn, conn=Depends(db)):
+        try:
+            return sx.confirm(conn, cfg, req.token, req.confirm_count, req.by, providers=state.get("providers"))
+        except sx.SendError as exc:
+            bad(exc, 409)
+
+    @app.get("/outbound")
+    def outbound(status: str | None = None, channel: str | None = None, batch_id: str | None = None,
+                 page: int = Query(1, ge=1), page_size: int = Query(25, ge=1, le=100), conn=Depends(db)):
+        conds, p = [], {}
+        for col, val in (("status", status), ("channel", channel), ("batch_id", batch_id)):
+            if val:
+                conds.append(f"o.{col} = %({col})s")
+                p[col] = val
+        w = ("WHERE " + " AND ".join(conds)) if conds else ""
+        total = conn.execute(f"SELECT count(*) AS n FROM outbound_messages o {w}", p).fetchone()["n"]
+        items = conn.execute(
+            f"""SELECT o.id, o.batch_id, o.family_id, o.channel, o.phone, o.lang, o.preview, o.status, o.provider,
+                       o.error, o.created_at, o.updated_at, o.created_by,
+                       (SELECT string_agg(s.name, ', ' ORDER BY s.id) FROM students s WHERE s.id = ANY(o.student_ids)) AS children
+                FROM outbound_messages o {w} ORDER BY o.id DESC LIMIT %(lim)s OFFSET %(off)s""",
+            {**p, "lim": page_size, "off": (page - 1) * page_size}).fetchall()
+        summary = {r["status"]: r["n"] for r in conn.execute(
+            "SELECT status, count(*) AS n FROM outbound_messages WHERE created_on = current_date GROUP BY status")}
+        return {**_page(items, total, page, page_size), "today": summary}
+
+    @app.post("/outbound/{oid}/retry")
+    def outbound_retry(oid: int, by: str | None = None, conn=Depends(db)):
+        try:
+            return sx.retry(conn, cfg, oid, by, providers=state.get("providers"))
+        except sx.SendError as exc:
+            bad(exc, 409)
+
+    @app.get("/webhooks/whatsapp", include_in_schema=False)
+    def wa_verify(request: Request):
+        q = request.query_params
+        tok = __import__("os").environ.get("WHATSAPP_VERIFY_TOKEN", "")
+        if tok and q.get("hub.mode") == "subscribe" and q.get("hub.verify_token") == tok:
+            return PlainTextResponse(q.get("hub.challenge", ""))
+        raise HTTPException(403, "Verification failed")
+
+    @app.post("/webhooks/whatsapp", include_in_schema=False)
+    async def wa_webhook(request: Request):
+        body = await request.body()
+        if not pv.check_meta_signature(body, request.headers.get("x-hub-signature-256")):
+            raise HTTPException(401, "Bad signature")
+        import json
+        payload = json.loads(body or b"{}")
+        with connect(cfg.database_url) as conn:
+            n = sum(sx.apply_status(conn, u["id"], u["status"], u["error"], payload)
+                    for u in pv.parse_whatsapp_statuses(payload))
+        return {"updated": n}
+
+    @app.post("/webhooks/msg91", include_in_schema=False)
+    async def msg91_webhook(request: Request, token: str = ""):
+        good = __import__("os").environ.get("MSG91_WEBHOOK_TOKEN", "")
+        import hmac
+        if not good or not hmac.compare_digest(token, good):
+            raise HTTPException(401, "Bad token")
+        payload = await request.json()
+        with connect(cfg.database_url) as conn:
+            n = sum(sx.apply_status(conn, u["id"], u["status"], u["error"], payload)
+                    for u in pv.parse_msg91_report(payload))
+        return {"updated": n}
 
     web = Path(__file__).resolve().parent.parent / "web"
     if web.is_dir():
@@ -750,6 +996,7 @@ def create_app(cfg: Config, *, start_watcher: bool = True, graph_client_factory=
         def home():
             return RedirectResponse("/app/")
 
+    app.state.schoolops = state  # tests inject fake transports here
     return app
 
 

@@ -50,14 +50,34 @@ def main(argv=None) -> int:
     s.add_argument("--file", help="Only this workbook (inside the watched folder).")
     s.add_argument("--force", action="store_true", help="Sync even if the file has not changed.")
     sub.add_parser("onedrive-login", help="Sign in to Microsoft (device code). Read-only access.")
+    sub.add_parser("onedrive-verify", help="Check the live OneDrive connection and inspect a few files (headings only).")
+    ie = sub.add_parser("inspect-excel", help="Propose the column mapping from real files on this computer.")
+    ie.add_argument("folder")
+    ie.add_argument("--write", help="Also write the suggested [layout]/[columns] to this file.")
     o = sub.add_parser("onedrive-sync", help="Download changed Excel files from OneDrive and sync them.")
     o.add_argument("--apply", action="store_true", help="Write to the database (otherwise dry run).")
+    mc = sub.add_parser("messaging-check", help="Check WhatsApp/SMS setup (read-only, sends nothing).")
+    mc.add_argument("--channel", choices=["whatsapp", "sms"], required=True)
+    st = sub.add_parser("send-test", help="Send ONE real reminder (approved wording, sample values) to YOUR OWN number.")
+    st.add_argument("--channel", choices=["whatsapp", "sms"], required=True)
+    st.add_argument("--to", required=True, help="Your own 10-digit mobile number")
+    st.add_argument("--lang", choices=["en", "hi", "mr"], default="mr")
     v = sub.add_parser("serve")
     v.add_argument("--host", default="127.0.0.1")
     v.add_argument("--port", type=int, default=8000)
     v.add_argument("--no-watch", action="store_true")
     a = ap.parse_args(argv)
 
+    if a.cmd == "inspect-excel":
+        from .inspect import format_report, inspect_folder, suggest_toml
+        rep = inspect_folder(a.folder)
+        print(format_report(rep))
+        print("\nSuggested mapping (check it, then copy into config.toml):\n")
+        print(suggest_toml(rep))
+        if a.write:
+            Path(a.write).write_text(suggest_toml(rep))
+            print("Written to", a.write)
+        return 0
     if a.cmd == "make-synthetic":
         for p in generate(a.folder):
             print("created", p)
@@ -85,19 +105,58 @@ def main(argv=None) -> int:
                 else:
                     res = sync_folder(c, cfg, dry_run=dry, trigger="manual", force=getattr(a, "force", False))
             print(json.dumps(res, indent=2, default=str, ensure_ascii=False))
-        elif a.cmd in ("onedrive-login", "onedrive-sync"):
+        elif a.cmd in ("onedrive-login", "onedrive-sync", "onedrive-verify"):
             from . import onedrive as od
             oc = od.OneDriveConfig.from_raw(cfg.onedrive)
             tp = od.MsalTokenProvider(oc)
             if a.cmd == "onedrive-login":
                 print("Signed in as", tp.login_device_code())
-                print("Done. The app can now read the OneDrive folder (read-only).")
+                print("Done. Now run onedrive-verify to check the folder.")
+            elif a.cmd == "onedrive-verify":
+                from .inspect import format_report
+                with connect(cfg.database_url) as c:
+                    init_db(c)
+                    v = od.verify(c, cfg, oc, od.GraphClient(tp))
+                print(f"VERIFIED live connection as {v['account']}: folder '{v['folder']}', "
+                      f"{v['excel_files']} Excel file(s), {v['sampled']} sampled.\n")
+                print(format_report(v["inspection"]))
             else:
                 cfg.assert_sync_allowed()
                 with connect(cfg.database_url) as c:
                     init_db(c)
                     res = od.sync_from_onedrive(c, cfg, oc, od.GraphClient(tp), dry_run=not a.apply)
                 print(json.dumps(res, indent=2, default=str, ensure_ascii=False))
+        elif a.cmd in ("messaging-check", "send-test"):
+            from datetime import datetime, timezone
+
+            from psycopg.types.json import Jsonb
+
+            from . import ai, providers as pv
+            from .sender import approved_template
+            if cfg.test_mode:
+                print("Test mode is on: messages are simulated. Use your real config.toml (test_mode = false).")
+                return 6
+            try:
+                prov = pv.get_provider(cfg, a.channel)
+                with connect(cfg.database_url) as c:
+                    init_db(c)
+                    if a.cmd == "messaging-check":
+                        res = prov.verify()
+                        res["checked_at"] = datetime.now(timezone.utc).isoformat()
+                        c.execute("""INSERT INTO settings (key, value) VALUES (%s, %s)
+                                     ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value""", (f"{a.channel}_verified", Jsonb(res)))
+                        print(f"{a.channel}: OK", json.dumps(res, ensure_ascii=False))
+                    else:
+                        t = approved_template(c, a.channel, a.lang)
+                        if not t:
+                            print(f"No approved {a.channel} wording for {a.lang}. Approve one in Messages first.")
+                            return 6
+                        vals = {"children": "TEST CHILD (Std 1): Rs 1", "total": "Rs 1", "school": cfg.school_name}
+                        r = prov.send(a.to, t, ai.variables(t["body"], vals))
+                        print(f"Accepted by {r.provider}, message id {r.message_id}. Check your phone.")
+            except pv.ProviderError as exc:
+                print(f"{a.channel}: NOT ready - {exc}", file=sys.stderr)
+                return 6
         elif a.cmd == "serve":
             import uvicorn
 

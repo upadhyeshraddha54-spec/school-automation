@@ -33,7 +33,7 @@ from .sync import is_workbook_name, sync_file
 
 log = logging.getLogger("schoolops.onedrive")
 GRAPH = "https://graph.microsoft.com/v1.0"
-DELEGATED_SCOPES = ["Files.Read.All"]          # read-only; works for files shared with the user
+DELEGATED_SCOPES = ["Files.Read.All", "User.Read"]  # read-only files + who signed in
 APP_SCOPES = ["https://graph.microsoft.com/.default"]  # app-only: grant Files.Read.All / Sites.Read.All (read)
 REMOVED_DIR = ".removed"
 
@@ -324,14 +324,43 @@ class OneDrivePoller:
             self._stop.wait(max(60.0, self.oc.poll_minutes * 60))
 
 
+def verify(conn, cfg: Config, oc: OneDriveConfig, client: GraphClient, sample: int = 5) -> dict:
+    """Prove the live connection: who is signed in, the folder can be listed, and a few files can be
+    downloaded and read. Only headings/counts are kept (no student data). Nothing is synced."""
+    import tempfile
+
+    from .inspect import inspect_folder
+
+    account = "app-only access"
+    if oc.auth == "device_code":
+        me = client.get(f"{GRAPH}/me?$select=displayName,userPrincipalName").json()
+        account = me.get("userPrincipalName") or me.get("displayName") or "signed in"
+    items = list(walk(client, folder_children_url(oc), oc, cfg.file_patterns))
+    with tempfile.TemporaryDirectory(prefix="schoolops-verify-") as tmp:
+        for item, rel in items[:sample]:
+            dest = Path(tmp) / rel
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            dest.write_bytes(client.download(item))
+        rep = inspect_folder(tmp)
+    result = {"verified_at": datetime.now(timezone.utc).isoformat(), "account": account,
+              "folder": oc.folder_path or oc.folder_item_id or "(root)", "excel_files": len(items),
+              "file_names": [rel for _, rel in items[:50]], "sampled": min(sample, len(items)), "inspection": rep}
+    conn.execute("""INSERT INTO settings (key, value) VALUES ('onedrive_verified', %s)
+                    ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value""", (Jsonb(result),))
+    return result
+
+
 def status(conn, cfg: Config, oc: OneDriveConfig) -> dict:
     r = conn.execute("SELECT value FROM settings WHERE key='onedrive_status'").fetchone()
     n = conn.execute("SELECT count(*) FILTER (WHERE deleted_at IS NULL) AS files FROM onedrive_items").fetchone()
+    v = conn.execute("SELECT value FROM settings WHERE key='onedrive_verified'").fetchone()
     return {"enabled": oc.enabled, "auth": oc.auth, "folder": oc.folder_path or oc.folder_item_id or "(root)",
             "drive": oc.drive_id or "my OneDrive", "configured": bool(oc.client_id),
             "token_cached": Path(oc.token_cache).exists(), "files_tracked": n["files"],
-            "last": r["value"] if r else None, "mirror_folder": str(cfg.watch_folder)}
+            "last": r["value"] if r else None, "mirror_folder": str(cfg.watch_folder),
+            # "live" is only ever true after a real verification against Microsoft succeeded
+            "verified": ({k: v["value"][k] for k in ("verified_at", "account", "excel_files")} if v else None)}
 
 
-__all__ = ["GraphClient", "MsalTokenProvider", "OneDriveConfig", "OneDrivePoller", "pull", "sync_from_onedrive",
+__all__ = ["verify", "GraphClient", "MsalTokenProvider", "OneDriveConfig", "OneDrivePoller", "pull", "sync_from_onedrive",
            "status", "NotConnected", "OneDriveError"]
