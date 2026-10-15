@@ -14,7 +14,7 @@ from pathlib import Path
 from openpyxl import load_workbook
 
 from .config import SYNTHETIC_MARKER, Config, NotAllowed
-from .reader import norm_key, read_workbook
+from .reader import _xls_to_xlsx, norm_key, read_workbook
 from .sync import sync_file
 
 MAX_FILES = 20
@@ -54,6 +54,13 @@ def _staging(cfg: Config, token: str) -> Path:
 
 def _columns(path: Path, cfg: Config) -> list[dict]:
     """For each expected heading: is it present in the heading row of every class sheet?"""
+    if path.suffix.lower() == ".xls":
+        conv = path.with_name(".cols-" + uuid.uuid4().hex + ".xlsx")
+        _xls_to_xlsx(path, conv)
+        try:
+            return _columns(conv, cfg)
+        finally:
+            conv.unlink(missing_ok=True)
     wb = load_workbook(path, read_only=True, data_only=True)
     try:
         sheets = {}
@@ -91,12 +98,24 @@ def preview_upload(conn, cfg: Config, files: list[tuple[str, bytes]]) -> dict:
         if len(data) > MAX_BYTES:
             r["problem"] = "File is larger than 10 MB."
             continue
-        if Path(safe).suffix.lower() not in (".xlsx", ".xlsm"):
-            r["problem"] = "Only .xlsx files can be imported. Open the file in Excel or WPS and use Save As → .xlsx."
+        if Path(safe).suffix.lower() not in (".xlsx", ".xlsm", ".xls"):
+            r["problem"] = "This is not an Excel file. Please choose .xlsx (or old .xls) files."
             continue
         p = folder / safe
         p.write_bytes(data)
-        if cfg.test_mode and not _is_synthetic(p):
+        if p.suffix.lower() == ".xls":
+            try:
+                conv = folder / (".check-" + uuid.uuid4().hex + ".xlsx")
+                _xls_to_xlsx(p, conv)
+                synthetic = _is_synthetic(conv)
+                conv.unlink(missing_ok=True)
+            except Exception:
+                p.unlink()
+                r["problem"] = "This .xls file could not be read. Open it in Excel or WPS and use Save As → .xlsx."
+                continue
+        else:
+            synthetic = _is_synthetic(p)
+        if cfg.test_mode and not synthetic:
             p.unlink()
             r["problem"] = "Test mode only accepts synthetic test files. Real school files are blocked until the column mapping is confirmed."
             continue

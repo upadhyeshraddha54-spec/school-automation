@@ -1,6 +1,7 @@
 """Approve or reject changes the sync held back. A person always decides."""
 from __future__ import annotations
 
+from .families import FamilyError, merge_families
 from .sync import insert_snapshot, insert_student
 
 
@@ -24,7 +25,8 @@ def _close(conn, item_id: int, status: str, by: str | None):
 
 def approve(conn, item_id: int, by: str | None = None) -> dict:
     """fee_change: accept the new Excel values.
-    possible_same_student: yes, it is the same student (keeps their call history)."""
+    possible_same_student: yes, it is the same student (keeps their call history).
+    possible_siblings: yes, these children have the same parent (families are joined)."""
     with conn.transaction():
         item = _load(conn, item_id)
         d = item["details"]
@@ -45,6 +47,14 @@ def approve(conn, item_id: int, by: str | None = None) -> dict:
                  d["file"], d["sheet"], target),
             )
             insert_snapshot(conn, target, item["run_id"], row["fees"], row.get("raw", {}), source="review_approved")
+        elif item["kind"] == "possible_siblings":
+            current = {r["family_id"] for r in conn.execute(
+                "SELECT family_id FROM students WHERE id = ANY(%s)", ([x["id"] for x in d["students"]],))}
+            if len(current) > 1:
+                try:
+                    merge_families(conn, sorted(current))
+                except FamilyError as exc:
+                    raise ReviewError(str(exc))
         else:
             raise ReviewError(f"Unknown review kind {item['kind']}")
         _close(conn, item_id, "approved", by)
@@ -53,7 +63,8 @@ def approve(conn, item_id: int, by: str | None = None) -> dict:
 
 def reject(conn, item_id: int, by: str | None = None) -> dict:
     """fee_change: keep the old values.
-    possible_same_student: no, it is a different student -> add them as a new student."""
+    possible_same_student: no, it is a different student -> add them as a new student.
+    possible_siblings: no, different parents -> they stay separate and we don't ask again."""
     with conn.transaction():
         item = _load(conn, item_id)
         d = item["details"]
@@ -63,8 +74,12 @@ def reject(conn, item_id: int, by: str | None = None) -> dict:
                 raise ReviewError("This student already exists.")
             sid = insert_student(conn, {k: row.get(k) for k in
                                         ("identity_key", "student_ext_id", "medium", "std", "section",
-                                         "sr_no", "name", "contact")}, d["file"], d["sheet"])
+                                         "sr_no", "name", "contact", "parent_name", "family_ext_id")},
+                                 d["file"], d["sheet"])
             insert_snapshot(conn, sid, item["run_id"], row["fees"], row.get("raw", {}), source="review_approved")
         _close(conn, item_id, "rejected", by)
+    if item["kind"] == "possible_same_student":
+        from .families import ensure_families
+        ensure_families(conn)
     return {"id": item_id, "status": "rejected"}
 

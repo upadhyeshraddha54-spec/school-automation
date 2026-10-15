@@ -61,7 +61,7 @@ def test_call_next_and_follow_ups(client):
     up = client.get("/follow-ups", params={"when": "upcoming"}).json()
     assert [u["id"] for u in up] == [nxt["id"]]
     hist = client.get("/calls", params={"student_id": nxt["id"]}).json()
-    assert hist["total"] == 1 and hist["items"][0]["outcome_label"] == "Gave a date"
+    assert hist["total"] == 1 and hist["items"][0]["outcome_label"] == "Will pay on date"
     d = client.get("/dashboard").json()
     assert d["calls_today"] == 1 and d["promised_today"] == 1 and d["students"] == 84
 
@@ -106,7 +106,7 @@ def test_review_via_api(client, folder):
     row = 2 + int(s["sr_no"])
     edit_cell(folder / "English - Std 10.xlsx", "10 Swan", row, "Balance", float(s["balance"]) + 999)
     client.post("/sync/run", json={"file": "English - Std 10.xlsx", "dry_run": False})
-    items = client.get("/review").json()
+    items = [i for i in client.get("/review").json() if i["kind"] == "fee_change"]
     assert len(items) == 1
     assert client.post(f"/review/{items[0]['id']}/approve", params={"by": "office"}).json()["status"] == "approved"
     assert client.post(f"/review/{items[0]['id']}/approve").status_code == 409

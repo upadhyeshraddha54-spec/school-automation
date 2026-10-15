@@ -53,7 +53,7 @@ class FolderWatcher:
 
     def start(self) -> None:
         self.cfg.assert_sync_allowed(self.folder)  # refuse to watch a real folder before mapping is confirmed
-        self._observer.schedule(_Handler(self), str(self.folder), recursive=False)
+        self._observer.schedule(_Handler(self), str(self.folder), recursive=self.cfg.recursive)
         self._observer.start()
         for target in (self._debounce_loop, self._reconcile_loop):
             t = threading.Thread(target=target, daemon=True)

@@ -48,12 +48,32 @@ def fake_students(rng: random.Random, n: int, start_phone: int) -> list[dict]:
     return out
 
 
-def generate(folder: str | Path, per_section: int = 12, seed: int = 7) -> list[Path]:
+# Synthetic siblings: (medium, file label, section, Sr. No.) pairs that share a parent phone.
+SIBLINGS = [
+    (("English", "Std 1", "Swan", 8), ("English", "Std 10", "Peacock", 2)),
+    (("English", "Std 1", "Swan", 9), ("English", "Std 10", "Peacock", 3)),
+    (("English", "Std 1", "Swan", 10), ("English", "Std 10", "Peacock", 4)),
+    (("Semi-English", "Std 1", "Lotus", 2), ("English", "Std 10", "Swan", 6)),
+]
+
+
+def generate(folder: str | Path, per_section: int = 12, seed: int = 7, siblings: bool = True) -> list[Path]:
     folder = Path(folder)
     folder.mkdir(parents=True, exist_ok=True)
     (folder / SYNTHETIC_MARKER).write_text("Synthetic test data only. Not real students.\n")
     rng = random.Random(seed)
     phone = 9000000000
+    data: dict[tuple, list[dict]] = {}
+    for medium, stds in LAYOUT.items():
+        for label, sections in stds.items():
+            for sec in sections:
+                data[(medium, label, sec)] = fake_students(rng, per_section, phone)
+                phone += 1000
+    if siblings and per_section >= 10:
+        for (m1, l1, s1, i1), (m2, l2, s2, i2) in SIBLINGS:
+            a, b = data[(m1, l1, s1)][i1 - 1], data[(m2, l2, s2)][i2 - 1]
+            b["contact"] = a["contact"]                      # same parent phone
+            b["name"] = a["name"].split()[0] + " " + b["name"].split()[1]  # same surname
     files = []
     for medium, stds in LAYOUT.items():
         for label, sections in stds.items():
@@ -61,9 +81,7 @@ def generate(folder: str | Path, per_section: int = 12, seed: int = 7) -> list[P
             wb.remove(wb.active)
             std_label = label.replace("Std ", "")
             for sec in sections:
-                studs = fake_students(rng, per_section, phone)
-                phone += 1000
-                make_sheet(wb.create_sheet(), std_label, sec, studs)
+                make_sheet(wb.create_sheet(), std_label, sec, data[(medium, label, sec)])
             wb.create_sheet("Summary")["A1"] = "Class summary (not a student sheet)"
             p = folder / f"{medium} - {label}.xlsx"
             wb.save(p)

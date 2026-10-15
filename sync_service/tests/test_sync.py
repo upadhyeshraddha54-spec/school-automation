@@ -31,7 +31,7 @@ def test_dry_run_writes_no_student_data(conn, cfg):
     assert all(f["status"] == "dry_run" for f in res["files"])
     assert sum(f["new_students"] for f in res["files"]) == 84
     assert count(conn, "students") == 0 and count(conn, "fee_snapshots") == 0
-    assert count(conn, "file_state") == 0 and count(conn, "review_items") == 0
+    assert count(conn, "file_state") == 0 and count(conn, "review_items") == 0  # dry run: no suggestions either
     assert count(conn, "sync_runs", "status='dry_run'") == 5  # only the report is stored
 
 
@@ -66,11 +66,11 @@ def test_balance_going_up_waits_for_review(conn, cfg, folder):
     res = sync_file(conn, cfg, folder / STD1, dry_run=False)
     assert res["needs_review"] == 1 and res["fee_updates"] == 0
     assert student_at(conn, folder, "1 Swan", 4)["balance"] == s["balance"]  # not applied
-    item = conn.execute("SELECT * FROM review_items").fetchone()
+    item = conn.execute("SELECT * FROM review_items WHERE kind <> 'possible_siblings'").fetchone()
     assert item["kind"] == "fee_change" and "balance_increased" in item["details"]["reasons"]
     # same change seen again -> no second review item
     sync_file(conn, cfg, folder / STD1, dry_run=False, force=True)
-    assert count(conn, "review_items") == 1
+    assert count(conn, "review_items", "kind <> 'possible_siblings'") == 1
     approve(conn, item["id"], by="office")
     assert student_at(conn, folder, "1 Swan", 4)["balance"] == s["balance"] + 5000
 
@@ -84,7 +84,7 @@ def test_paid_going_down_waits_for_review(conn, cfg, folder):
         pytest.skip("synthetic student has paid nothing")
     res = sync_file(conn, cfg, folder / STD1, dry_run=False)
     assert res["needs_review"] == 1
-    item = conn.execute("SELECT * FROM review_items").fetchone()
+    item = conn.execute("SELECT * FROM review_items WHERE kind <> 'possible_siblings'").fetchone()
     assert "paid_decreased" in item["details"]["reasons"]
     reject(conn, item["id"], by="office")
     assert student_at(conn, folder, "1 Swan", 5)["paid"] == s["paid"]
@@ -98,7 +98,7 @@ def test_name_correction_is_reviewed_not_duplicated_and_keeps_calls(conn, cfg, f
     res = sync_file(conn, cfg, folder / STD1, dry_run=False)
     assert res["needs_review"] == 1 and res["new_students"] == 0 and res["missing_from_file"] == 0
     assert count(conn, "students") == 84
-    item = conn.execute("SELECT * FROM review_items").fetchone()
+    item = conn.execute("SELECT * FROM review_items WHERE kind <> 'possible_siblings'").fetchone()
     assert item["kind"] == "possible_same_student" and item["student_id"] == s["id"]
     approve(conn, item["id"])  # same child, spelling fixed
     row = conn.execute("SELECT * FROM students WHERE id=%s", (s["id"],)).fetchone()
@@ -113,7 +113,7 @@ def test_rejecting_a_possible_match_adds_a_new_student(conn, cfg, folder):
     s = student_at(conn, folder, "1 Peacock", 7)
     edit_cell(folder / STD1, "1 Peacock", 7, "Student Name", "Different Child")
     sync_file(conn, cfg, folder / STD1, dry_run=False)
-    item = conn.execute("SELECT * FROM review_items").fetchone()
+    item = conn.execute("SELECT * FROM review_items WHERE kind <> 'possible_siblings'").fetchone()
     reject(conn, item["id"])
     assert count(conn, "students") == 85
     assert conn.execute("SELECT name FROM students WHERE id=%s", (s["id"],)).fetchone()["name"] == s["name"]
@@ -198,3 +198,36 @@ def test_lock_and_temp_files_are_ignored(conn, cfg, folder):
     (folder / ".~lock.English - Std 1.xlsx#").write_bytes(b"lock")
     res = sync_folder(conn, cfg, dry_run=True)
     assert len(res["files"]) == 5
+
+
+def test_renamed_file_is_recognised_without_duplicates(conn, cfg, folder):
+    sync_folder(conn, cfg, dry_run=False)
+    (folder / STD1).rename(folder / "English - Std 1 (2026-27).xlsx")
+    res = sync_folder(conn, cfg, dry_run=False)
+    r = next(f for f in res["files"] if f["file"].startswith("English - Std 1 ("))
+    assert r["status"] == "applied" and r["new_students"] == 0 and r["missing_from_file"] == 0
+    assert count(conn, "students") == 84
+    assert count(conn, "sync_issues", "code='file_renamed'") == 1
+    assert res["files_missing_from_folder"] == []  # state moved with the file
+
+
+def test_files_in_subfolders_when_recursive(conn, cfg, folder):
+    sub = folder / "Semi-English"
+    sub.mkdir()
+    (folder / "Semi-English - Std 1.xlsx").rename(sub / "Semi-English - Std 1.xlsx")
+    cfg.recursive = False
+    assert count_files(sync_folder(conn, cfg, dry_run=True)) == 4
+    cfg.recursive = True
+    res = sync_folder(conn, cfg, dry_run=False)
+    assert count_files(res) == 5 and count(conn, "students") == 84
+
+
+def count_files(res):
+    return len(res["files"])
+
+
+def test_unreadable_file_is_reported_not_skipped(conn, cfg, folder):
+    (folder / "Old format.xls").write_bytes(b"garbage")
+    res = sync_folder(conn, cfg, dry_run=False)
+    bad = next(f for f in res["files"] if f["file"] == "Old format.xls")
+    assert bad["status"] == "failed" and bad["errors"] == 1

@@ -1,128 +1,147 @@
-# SchoolOps Excel Sync
+# SchoolOps – Fees Calling Desk
 
-Keeps the Fees Calling Desk database up to date with the school's Excel files.
-Office staff keep using Excel exactly as before. When a file is saved, this service reads it,
-checks it, and updates PostgreSQL.
+For **one office staff member** who follows up unpaid school fees by phone. The office keeps
+editing its class-wise Excel workbooks as before. This app reads them (never writes to them), shows
+who to call today, records what each parent said, schedules the next follow-up, and prepares reminder
+drafts in English, हिन्दी and मराठी. **No calls or messages are made automatically.**
 
 ```
-Office saves Excel ─▶ watcher notices (waits until the save is finished)
-                   ─▶ reads a COPY of the file (original is never touched)
-                   ─▶ validates headings, amounts, phones, duplicates
-                   ─▶ plans changes ─▶ dry run: report only
-                                    ─▶ apply: one database transaction per file
-Every 30 min: full re-check of the folder (catches missed saves)
+Excel class files (OneDrive folder, synced to the Mac)
+   └─▶ watcher / Add Excel ─▶ validate ─▶ plan (dry run) ─▶ apply ─▶ PostgreSQL
+                                             │                     ├─ students, families (parents)
+                                             └─▶ review queue ◀────┤─ fee history (append-only)
+                                                                   ├─ calls, follow-ups, campaigns
+   Browser app (4 tabs) ◀─────────── FastAPI ◀─────────────────────┘─ message drafts
 ```
 
-## Safety rules (built in, covered by tests)
-
-| Rule | How |
-|---|---|
-| Never modify Excel | Files are copied to a temp folder and only the copy is opened, read-only. A test checks the hash and timestamp of every file before and after. |
-| No guessed student IDs | A student is matched only by an exact key: the ID column if the school has one, otherwise medium + class + section + Sr. No. + name. A row that only *looks* like an existing student (same Sr. No. or same name) goes to **Review**; a person decides. |
-| No duplicates | Duplicate rows in a file are rejected and logged. Re-syncing the same file changes nothing. |
-| Never marks anyone "paid" | The system stores what Excel says (Total, Paid, Balance) with a date. A balance of 0 is shown as "No balance in Excel", not "Paid". The call outcome "Says already paid" does not change fees. |
-| Payment history kept | Fee values are appended as snapshots; old values are never overwritten. |
-| Suspicious money changes held | A balance going **up** or a paid amount going **down** waits in Review (until the school agrees other rules). |
-| Call history kept | The sync never writes to `calls` or `messages`. Students are never deleted; a student missing from the latest file is flagged `missing_since`. |
-| Layout changes caught | If a sheet's headings change, that sheet is skipped and logged, and its students are not marked missing. |
-| Dry run first | `dry_run = true` by default. Dry runs write only a report. |
-| Not on real data before confirmation | The service refuses a real folder until `mapping_confirmed = true`. Test mode only runs in folders created by the synthetic generator. |
-| No real messages | Messages are previews (English / हिन्दी / मराठी). "Send" stores a record with status `mock_not_sent`. |
-
-## Setup
-
-1. **Install PostgreSQL** (version 14 or newer) and create a database:
-   ```sql
-   CREATE USER schoolops WITH PASSWORD 'choose-a-strong-password';
-   CREATE DATABASE schoolops OWNER schoolops ENCODING 'UTF8';
-   ```
-2. **Install Python 3.11+**, then in this folder:
-   ```bash
-   python -m venv .venv
-   source .venv/bin/activate        # Windows: .venv\Scripts\activate
-   pip install -r requirements.txt
-   ```
-3. **Try it on fake data first:**
-   ```bash
-   python -m schoolops_sync make-synthetic ./synthetic_school
-   # copy tests/test_config.toml to synthetic.toml, set watch_folder = "./synthetic_school"
-   # and database_url to your database, then:
-   python -m schoolops_sync --config synthetic.toml init-db
-   python -m schoolops_sync --config synthetic.toml check          # dry run, writes nothing
-   python -m schoolops_sync --config synthetic.toml sync --apply   # writes to the database
-   python -m schoolops_sync --config synthetic.toml serve          # API + watcher on http://127.0.0.1:8000
-   ```
-   Open http://127.0.0.1:8000/docs to try every endpoint.
-4. **Before real school files** (do not skip):
-   - Copy `config.example.toml` to `config.toml`. Fill in every `TODO`.
-   - Confirm the column headings, where class/section/medium come from, and the payment rules **with the school**.
-   - Keep `dry_run = true`. Set `mapping_confirmed = true` and run `check`. Read the report: number of students per class, errors, warnings.
-   - Only when the report is correct, set `dry_run = false`.
-   - Files must be **.xlsx**. Old **.xls** files are rejected with a message (Save As .xlsx in Excel/WPS).
-   - If the folder is on a network drive, set `polling = true`.
-
-## Start on a Mac (synthetic data)
+## Start on a Mac
 
 ```bash
+# once
 brew install postgresql@16 python@3.12
 brew services start postgresql@16
-git clone -b excel-sync-service https://github.com/upadhyeshraddha54-spec/school-automation.git ~/school-automation
-cd ~/school-automation/sync_service && ./start_mac.sh
+
+# from your copy of this repository
+cd school-automation/sync_service
+./start_mac.sh          # opens http://127.0.0.1:8000 with SYNTHETIC students
+./start_mac.sh test     # runs the test suite on a separate database
 ```
-Next time, only: `cd ~/school-automation/sync_service && ./start_mac.sh`
 
-The script creates the `schoolops` database, a Python environment, a folder of fake class files
-(`synthetic_school/`) and `local.toml` (test mode), then opens http://127.0.0.1:8000.
+`start_mac.sh` creates the `schoolops` database, a Python environment (`.venv`), a folder of fake
+class files (`synthetic_school/`) and `local.toml` (test mode). In the app: **Students & Fees →
++ Add Excel** and choose the files in `synthetic_school/`.
 
-## Teacher app (Fees Calling Desk)
+## What the app does
 
-| Tab | What teachers do there |
+| Tab | For the staff member |
 |---|---|
-| Dashboard | Summary cards, **Call next parent** with the 8 one-tap results, Undo, follow-ups today/overdue, each class against a daily target |
-| Students & Fees | **+ Add Excel**, search, filters (medium, class Nursery–10, section, fee status), order by class or highest balance, 25 per page, total/paid/balance, "Changes to check". Click a student for details, fee history, call history and a call form |
-| Call Records | Every call with filters, pages, and **Copy for Excel** |
-| Messages | English / हिन्दी / मराठी previews with Copy. "Save as test message" only logs; nothing is sent |
+| **Dashboard** | Summary (pending fees, parents called today vs. daily target, missed promises, follow-ups due, office actions, Excel changes to check). **Fee campaign** (e.g. start of year): scope by medium/class/section, daily target, progress (parents contacted, amount collected and students cleared according to Excel). **Call next parent**: one entry per parent, siblings together, in priority order: *missed promise → due today → not called yet → no reply for a week*. Up-next list, skip, search and class/medium/section filters. **Follow-ups**: Missed / Today / Upcoming / Office. Per-class progress. |
+| **Students & Fees** | **+ Add Excel** (several files → preview, column check, problems, planned changes → confirm → import). Searchable, paginated table with filters (medium, class Nursery–10, section, fee status, follow-up status). Student view: fees, fee history, call and follow-up history, siblings. **Parent view**: every child's class, total/paid/balance and next step, combined total (each child counted once), one call for several children, link/separate siblings. **Excel sync & review**: status, dry-run check, current problems per file/row, "Changes to check", recent syncs. |
+| **Call Records** | Every call with filters (incl. result), siblings covered by the same call, Copy for Excel. |
+| **Messages** | Pick a parent → tick children → language → draft (one combined message for siblings) → edit → approve → copy. Drafts list with status. Sending is off. |
 
-**+ Add Excel:** choose one or more .xlsx files → the app checks each file (columns found or missing,
-classes, first 8 rows, problems per row, and what would change) → untick files you don't want →
-**Import selected files** → confirm → done. Nothing is saved before the confirmation; your Excel
-files are never changed (the app works on its own copy and deletes it afterwards). Old .xls files are
-refused with a "Save As .xlsx" message. In test mode only synthetic files are accepted.
+### Call results and what happens next
+| Result | Next follow-up (one open follow-up per child, never duplicated) |
+|---|---|
+| Will pay | Call back in 3 days |
+| Will pay on date | Promise on the chosen date (date required). If the date passes and Excel still shows a balance → **Missed promise** at the top of the queue |
+| Part payment | Part-payment promise (date optional, default 7 days; amount optional). Part payments seen in Excel are shown as "Part paid ₹…" |
+| Call again | Call back on the chosen date (default tomorrow) |
+| No answer / Phone off | Try again tomorrow |
+| Wrong number | Office action: fix the number in Excel (out of the calling queue) |
+| Says already paid | Office action: check the payment (fees are **not** marked paid) |
+| Fee issue | Office action: resolve the dispute (out of the calling queue) |
 
-## Commands
+A new call closes the previous follow-up (as *missed* if it was a promise past its date). When Excel shows
+a balance of 0, open follow-ups close as *paid*. Undo (10 minutes) removes the whole call for every child
+it covered and restores the previous follow-up.
 
+### Parents and siblings
+* One parent (family) → many students. Every student has exactly one family.
+* Students are joined automatically **only** by a verified ID column (`[columns] family_id`).
+* A **shared phone number never merges anyone**. It creates a "Same parent?" question in
+  *Excel sync & review*. "No" is remembered and not asked again.
+* Staff can also link or separate siblings in the parent view.
+
+### Excel sync safety (all covered by tests)
+* Files are copied to a temp folder; only the copy is opened. Old **.xls** files are read through a
+  converted copy (needs `xlrd`); unreadable files are logged as errors, never silently skipped.
+* Exact identity matching (ID column, or medium+class+section+Sr. No.+name). Near-matches → review.
+  Re-processing the same workbook changes nothing (idempotent). Renamed/moved files are recognised by content.
+* Balance going **up** or paid amount going **down** → held for review. Fee values are append-only history.
+* Students missing from a file are flagged, never deleted. Calls, follow-ups and drafts are never touched by the sync.
+* Layout changes (missing headings) skip only that sheet and are reported.
+* Dry run is the default; real folders are refused until the mapping is confirmed; in test mode only synthetic files are accepted.
+
+## Configuration
+
+### Environment variables
+| Variable | Purpose | Default |
+|---|---|---|
+| `DATABASE_URL` | PostgreSQL connection, overrides `database_url` in the config | from config |
+| `SCHOOLOPS_WATCH_FOLDER` | Folder with the class files, overrides `watch_folder` | from config |
+| `TEST_DATABASE_URL` | Separate database for `pytest` | `postgresql://postgres@localhost:5433/schoolops_test` |
+
+No secrets are needed for the local Mac setup (Homebrew PostgreSQL uses your Mac user, local socket only).
+If you set a database password, put it in `DATABASE_URL` or in a `.env`/`config.toml` that is **not committed**
+(both are in `.gitignore`).
+
+### Database
+PostgreSQL 14+. Tables are created/upgraded automatically (`init-db`, or on app start). Manual:
+```bash
+createdb -E UTF8 schoolops
+.venv/bin/python -m schoolops_sync --config config.toml init-db
+```
+
+### Connecting the real OneDrive folder (when you are ready)
+1. Install the **OneDrive** app on the Mac and sync the shared fees folder. It appears under
+   `~/Library/CloudStorage/OneDrive-<Organisation>/…`. In Finder, right-click the folder → **Always Keep on This Device**
+   (so files are real files, not online-only placeholders).
+2. `cp config.example.toml config.toml` and fill in every `TODO`:
+   `watch_folder` (that path), `polling = true`, `recursive` if there are sub-folders, `school_name`.
+3. **Column mapping** – open one real class file and copy the exact headings into `[columns]`.
+   Do not map columns whose meaning is unclear (e.g. "2500", blank columns, "old fees pending").
+   Set where class / section / medium come from in `[classification]`.
+4. Agree the **payment rules** with the school (`[payment_rules]`).
+5. Keep `dry_run = true`, set `mapping_confirmed = true`, run
+   `.venv/bin/python -m schoolops_sync --config config.toml check` and read the report.
+6. Only when the report is right: `dry_run = false`, then
+   `.venv/bin/python -m schoolops_sync --config config.toml serve` (app + watcher + reconciliation every 30 min).
+
+The Microsoft Graph (cloud API) integration is **not** built; the app relies on the OneDrive desktop app
+keeping the folder synced on this Mac.
+
+### Commands
 | Command | What it does |
 |---|---|
-| `init-db` | Create tables (safe to run again) |
-| `make-synthetic FOLDER` | Create fake workbooks for testing |
-| `check` | Dry run of the whole folder; prints the report |
-| `sync --apply [--file NAME] [--force]` | Apply changes; `--force` re-reads unchanged files |
-| `serve [--no-watch]` | Start the app/API (and the folder watcher unless `--no-watch`) |
+| `init-db` | Create/upgrade tables (safe to repeat) |
+| `make-synthetic FOLDER` | Create fake class workbooks (with sibling pairs) |
+| `check` | Dry run of the whole folder; prints the report; writes nothing |
+| `sync --apply [--file NAME] [--force]` | Apply changes from the folder |
+| `serve [--no-watch] [--port N]` | Start the app/API (and the watcher unless `--no-watch`) |
 
-## API (for the UI pages)
-
-| Page | Endpoints |
-|---|---|
-| Dashboard | `GET /dashboard`, `GET /call-next`, `GET /follow-ups?when=today\|overdue\|upcoming` |
-| Students | `GET /students?search=&std=&medium=&section=&fee_status=&page=&page_size=`, `GET /students/{id}`, `GET /filters` |
-| Fee Collection | `GET /students?fee_status=due`, `GET /students/{id}` (fee history) |
-| Call History | `POST /calls`, `DELETE /calls/{id}` (undo within 10 min), `GET /calls?...` |
-| Messages | `GET /messages/preview/{student_id}`, `POST /messages/mock`, `GET /messages` |
-| Excel Sync | `GET /sync/status`, `POST /sync/run`, `GET /sync/runs`, `GET /sync/runs/{id}`, `GET /review`, `POST /review/{id}/approve\|reject` |
-
-Review decisions:
-- **Fee change**: approve = accept the new Excel values; reject = keep the old values.
-- **Possible same student**: approve = same child (name/Sr. No. corrected, call history kept); reject = a different child (added as new).
+## Backup and recovery
+```bash
+mkdir -p ~/SchoolOpsBackups
+pg_dump -Fc schoolops > ~/SchoolOpsBackups/schoolops-$(date +%F).dump      # daily is enough
+# restore into an empty database:
+createdb -E UTF8 schoolops_restored
+pg_restore -d schoolops_restored ~/SchoolOpsBackups/schoolops-2026-10-15.dump
+```
+Keep backups **outside** the repository (they contain student data). The Excel files remain the
+source of truth for fees; calls, follow-ups and drafts exist only in the database, so back it up.
 
 ## Tests
-
 ```bash
-# needs a PostgreSQL test database
-export TEST_DATABASE_URL=postgresql://postgres@localhost:5432/schoolops_test
-python -m pytest -q
+./start_mac.sh test
+# or: TEST_DATABASE_URL=postgresql:///schoolops_test .venv/bin/python -m pytest -q
 ```
-48 tests cover the reader, the sync rules, the watcher, the API and the Add Excel import.
-All test data is synthetic.
+Tests use synthetic data only and cover: reading/validation (incl. real .xls), repeated and changed
+syncs, duplicates, renamed/moved files, sub-folders, review decisions, siblings and families, separate
+and combined balances, call outcomes and follow-up scheduling, missed promises, payments seen in Excel,
+undo, campaigns and targets, message drafts and approval, uploads, the watcher, and the API.
 
-## Logs
-`logs/sync.log` (rotating). Every run, issue and decision is also stored in `sync_runs`, `sync_issues` and `review_items`.
+## Not built yet (needs your decision or credentials)
+* Real SMS/WhatsApp/email sending (needs a provider account; `[messaging] enabled` stays `false`).
+* Microsoft Graph / OneDrive cloud API (the OneDrive desktop app is used instead).
+* Real column mapping and payment rules (need the school's confirmation).

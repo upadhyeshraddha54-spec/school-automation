@@ -22,6 +22,8 @@ KNOWN_FIELDS = (
     "discount",
     "paid",
     "balance",
+    "parent_name",     # optional: parent/guardian name
+    "family_id",       # optional: a VERIFIED family/parent ID. Students with the same value become siblings.
 )
 REQUIRED_FIELDS = ("student_name", "balance")
 
@@ -51,9 +53,11 @@ class Config:
     dry_run: bool = True
     debounce_seconds: float = 5.0
     reconcile_minutes: float = 30.0
-    file_patterns: tuple[str, ...] = ("*.xlsx", "*.xlsm")
+    file_patterns: tuple[str, ...] = ("*.xlsx", "*.xlsm", "*.xls")
     log_file: str = "logs/sync.log"
     upload_folder: str = "data/uploads"  # staged copies of files added from the app
+    recursive: bool = False  # also read class files inside sub-folders (e.g. one OneDrive folder per medium)
+    messaging_enabled: bool = False  # real sending needs a provider; none is built in
     polling: bool = False  # true for network/shared drives where file events are unreliable
     school_name: str = "School"
     header_row: int = 2
@@ -79,7 +83,7 @@ class Config:
     def assert_sync_allowed(self, folder: Path | None = None) -> None:
         folder = Path(folder or self.watch_folder)
         if self.test_mode:
-            if not (folder / SYNTHETIC_MARKER).exists():
+            if not any((p / SYNTHETIC_MARKER).exists() for p in (folder, *folder.resolve().parents)):
                 raise NotAllowed(
                     f"test_mode is on, but {folder} is not a synthetic test folder "
                     f"(no {SYNTHETIC_MARKER} file). Test mode never runs on real data."
@@ -126,10 +130,12 @@ def load_config(path: str | os.PathLike) -> Config:
         dry_run=bool(svc.get("dry_run", True)),
         debounce_seconds=float(svc.get("debounce_seconds", 5)),
         reconcile_minutes=float(svc.get("reconcile_minutes", 30)),
-        file_patterns=tuple(svc.get("file_patterns", ["*.xlsx", "*.xlsm"])),
+        file_patterns=tuple(svc.get("file_patterns", ["*.xlsx", "*.xlsm", "*.xls"])),
         log_file=svc.get("log_file", "logs/sync.log"),
         upload_folder=svc.get("upload_folder", "data/uploads"),
         polling=bool(svc.get("polling", False)),
+        recursive=bool(svc.get("recursive", False)),
+        messaging_enabled=bool(raw.get("messaging", {}).get("enabled", False)),
         school_name=svc.get("school_name", "School"),
         header_row=int(layout.get("header_row", 2)),
         first_data_row=int(layout.get("first_data_row", 3)),

@@ -48,6 +48,8 @@ class StudentRow:
     section: str | None
     sr_no: str | None = None
     student_ext_id: str | None = None
+    parent_name: str | None = None
+    family_ext_id: str | None = None
     contact: str | None = None
     total_fee: Decimal | None = None
     discount: Decimal | None = None
@@ -170,19 +172,72 @@ def _classify(c: Classifier | None, file_stem: str, sheet: str, class_cell: Any)
     return norm_text(m.group(1) if m.groups() else m.group(0))
 
 
+def _xls_to_xlsx(src: Path, dst: Path) -> None:
+    """Old .xls -> a temporary .xlsx copy (values only). The original is only read."""
+    import xlrd  # optional dependency, only needed for .xls
+    from openpyxl import Workbook
+
+    book = xlrd.open_workbook(str(src), on_demand=True)
+    wb = Workbook()
+    wb.remove(wb.active)
+    try:
+        for sh in book.sheets():
+            ws = wb.create_sheet(sh.name[:31])
+            for r in range(sh.nrows):
+                row = []
+                for c in range(sh.ncols):
+                    cell = sh.cell(r, c)
+                    v = cell.value
+                    if cell.ctype in (xlrd.XL_CELL_EMPTY, xlrd.XL_CELL_BLANK):
+                        v = None
+                    elif cell.ctype == xlrd.XL_CELL_ERROR:
+                        v = None
+                    elif cell.ctype == xlrd.XL_CELL_NUMBER and float(v).is_integer():
+                        v = int(v)
+                    row.append(v)
+                ws.append(row)
+    finally:
+        book.release_resources()
+    wb.save(dst)
+
+
 def read_workbook(path: str | Path, cfg: Config) -> ParsedFile:
     path = Path(path)
-    if path.suffix.lower() not in (".xlsx", ".xlsm"):
-        pf = ParsedFile(path=path, file_hash=sha256_file(path) if path.exists() else "")
+    suffix = path.suffix.lower()
+    if suffix not in (".xlsx", ".xlsm", ".xls"):
+        pf = ParsedFile(path=path, file_hash="")
         pf.fatal = True
-        pf.add("error", "unsupported_format",
-               f"{path.name}: only .xlsx files can be read. Open it in Excel/WPS and Save As .xlsx.")
+        pf.add("error", "unsupported_format", f"{path.name}: not an Excel file (.xlsx or .xls).")
         return pf
 
     with tempfile.TemporaryDirectory(prefix="schoolops-") as tmp:
-        copy = Path(tmp) / "copy.xlsx"
-        shutil.copy2(path, copy)  # read-only copy; the original is never opened for writing
+        copy = Path(tmp) / ("copy" + suffix)
+        try:
+            shutil.copy2(path, copy)  # read-only copy; the original is never opened for writing
+        except OSError as exc:  # e.g. OneDrive file not downloaded yet, or locked
+            pf = ParsedFile(path=path, file_hash="")
+            pf.fatal = True
+            pf.add("error", "file_not_available",
+                   f"{path.name}: could not be read right now ({exc.__class__.__name__}). "
+                   "If it is in OneDrive, it may still be downloading. It will be tried again.")
+            return pf
         pf = ParsedFile(path=path, file_hash=sha256_file(copy))
+        if suffix == ".xls":
+            try:
+                converted = Path(tmp) / "converted.xlsx"
+                _xls_to_xlsx(copy, converted)
+                copy = converted
+                pf.add("info", "converted_xls", f"{path.name}: old .xls format, read through a converted copy.")
+            except ImportError:
+                pf.fatal = True
+                pf.add("error", "xls_reader_missing",
+                       f"{path.name}: .xls files need the 'xlrd' package (pip install xlrd), or Save As .xlsx.")
+                return pf
+            except Exception as exc:
+                pf.fatal = True
+                pf.add("error", "unreadable_file",
+                       f"{path.name}: could not read this .xls file ({exc.__class__.__name__}). Open it and Save As .xlsx.")
+                return pf
         try:
             wb = load_workbook(copy, read_only=True, data_only=True)
         except Exception as exc:  # corrupt / half-saved / password protected
@@ -253,6 +308,8 @@ def _read_sheet(pf: ParsedFile, cfg: Config, stem: str, sheet: str, rows: list[t
         s = StudentRow(sheet=sheet, row_number=excel_row, name=name, medium=medium, std=std,
                        section=sec.title() if sec else None, sr_no=sr_out,
                        student_ext_id=_id_text(get("student_id")),
+                       parent_name=norm_text(get("parent_name")) or None,
+                       family_ext_id=_id_text(get("family_id")),
                        raw={cfg.columns[f]: _jsonable(get(f)) for f in found})
 
         for label, val, fixed in (("class", std_raw, std), ("medium", med_raw, medium)):

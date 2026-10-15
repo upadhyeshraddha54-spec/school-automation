@@ -8,7 +8,8 @@ database_url = "postgresql://schoolops:CHANGE_ME@localhost:5432/schoolops"
 dry_run = true            # keep true until a dry run of the real folder looks correct
 debounce_seconds = 5      # wait this long after the last save before reading a file
 reconcile_minutes = 30    # full re-check of the folder, in case a save was missed
-polling = false           # set true if the folder is on a network drive
+polling = true            # recommended for OneDrive / network folders (file events can be missed there)
+recursive = false         # true if class files are inside sub-folders (e.g. one folder per medium)
 log_file = "logs/sync.log"
 school_name = "Your School Name"            # used in parent message previews
 
@@ -24,6 +25,9 @@ test_mode = false
 # TODO: confirm every heading below with the school. "2500", the blank columns and
 # "old fees pending" are NOT mapped until we know what they mean.
 # student_id = ""        # GR no. / admission no. if the school has one (best identity)
+# parent_name = ""       # parent/guardian name column, if any
+# family_id = ""         # ONLY a verified family/parent ID column. Students with the same value become siblings.
+#                        # Never use the phone column here: shared phones only create "Same parent?" questions.
 sr_no = "Sr. No."
 student_name = "Student Name"
 class_label = "Class"
@@ -54,3 +58,7 @@ regex = '^(Semi-English|English)'
 confirmed = false
 balance_increase = "review"   # balance went UP since last sync -> hold for a person to check
 paid_decrease = "review"      # Paid amount went DOWN -> hold for a person to check
+
+[messaging]
+# No SMS/WhatsApp/email provider is built in. Drafts can be edited, approved and copied only.
+enabled = false

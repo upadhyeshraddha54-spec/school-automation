@@ -41,6 +41,12 @@ if [ ! -f local.toml ]; then
   printf '\n# Mac test settings\n' >> local.toml
 fi
 
+if [ "${1:-}" = "test" ]; then
+  psql -lqt | cut -d '|' -f1 | grep -qw schoolops_test || createdb -E UTF8 schoolops_test
+  echo "Running tests on the separate schoolops_test database (synthetic data only)…"
+  TEST_DATABASE_URL="postgresql:///schoolops_test" exec .venv/bin/python -m pytest -q
+fi
+
 .venv/bin/python -m schoolops_sync --config local.toml init-db
 echo
 echo "✅ Fees Calling Desk is starting with SYNTHETIC students: http://127.0.0.1:8000"

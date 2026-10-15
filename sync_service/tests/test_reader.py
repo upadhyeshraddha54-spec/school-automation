@@ -1,4 +1,6 @@
 from decimal import Decimal
+
+import pytest
 from pathlib import Path
 
 from openpyxl import Workbook
@@ -26,11 +28,30 @@ def test_semi_english_and_nursery_classified(cfg, folder):
     assert {r.std for r in nur.rows} == {"Nursery"}
 
 
-def test_old_xls_is_rejected_with_clear_message(cfg, folder):
+def test_broken_xls_fails_loudly(cfg, folder):
     p = folder / "Std 1.xls"
     p.write_bytes(b"not really excel")
     pf = read_workbook(p, cfg)
-    assert pf.fatal and pf.issues[0].code == "unsupported_format"
+    assert pf.fatal and pf.issues[0].code == "unreadable_file" and ".xlsx" in pf.issues[0].message
+
+
+def test_real_xls_is_read_through_a_converted_copy(cfg, folder, tmp_path):
+    import shutil
+    import subprocess
+    if not shutil.which("soffice"):
+        pytest.skip("LibreOffice not installed; cannot create an .xls test file")
+    src = folder / "English - Std 1.xlsx"
+    out = tmp_path / "xls"
+    subprocess.run(["soffice", "--headless", "--convert-to", "xls", "--outdir", str(out), str(src)],
+                   check=True, capture_output=True, timeout=120)
+    xls = folder / "English - Std 1 old.xls"
+    shutil.move(out / "English - Std 1.xls", xls)
+    before = sha256_file(xls)
+    pf = read_workbook(xls, cfg)
+    assert not pf.fatal and pf.sheets_read == ["1 Peacock", "1 Swan"] and len(pf.rows) == 24
+    assert pf.rows[0].contact == "9000001000" and pf.rows[0].balance is not None
+    assert any(i.code == "converted_xls" for i in pf.issues)
+    assert sha256_file(xls) == before  # original untouched
 
 
 def test_changed_layout_fails_the_sheet_not_the_whole_file(cfg, folder):

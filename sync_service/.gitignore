@@ -8,3 +8,14 @@ synthetic_school/
 local.toml
 .venv/
 data/
+# secrets, real data, backups (never commit)
+.env
+.env.*
+*.sql
+*.dump
+*.backup
+backups/
+exports/
+*.log
+*.csv
+real_data/

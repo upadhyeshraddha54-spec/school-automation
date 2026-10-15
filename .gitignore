@@ -1,0 +1,13 @@
+.env
+.env.*
+config.toml
+local.toml
+*.xlsx
+*.xls
+*.sql
+*.dump
+backups/
+exports/
+logs/
+.venv/
+__pycache__/

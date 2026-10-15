@@ -114,8 +114,78 @@ CREATE TABLE IF NOT EXISTS file_state (
 );
 """
 
-ALL_TABLES = ("messages", "calls", "review_items", "fee_snapshots", "file_state",
-              "students", "sync_issues", "sync_runs")
+# Additive upgrades. Safe to run on an existing database (everything is IF NOT EXISTS).
+MIGRATIONS = """
+-- One parent/guardian (family) -> many students. A phone number is never used as an identity.
+CREATE TABLE IF NOT EXISTS families (
+    id            BIGSERIAL PRIMARY KEY,
+    family_key    TEXT UNIQUE,              -- verified ID from Excel (e.g. a Family/Parent ID column), if mapped
+    display_name  TEXT,                     -- parent name if Excel has one
+    verified      BOOLEAN NOT NULL DEFAULT FALSE,  -- true when linked by a verified ID or confirmed by staff
+    created_at    TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+ALTER TABLE students ADD COLUMN IF NOT EXISTS family_id BIGINT REFERENCES families(id);
+ALTER TABLE students ADD COLUMN IF NOT EXISTS parent_name TEXT;
+ALTER TABLE students ADD COLUMN IF NOT EXISTS family_ext_id TEXT;
+CREATE INDEX IF NOT EXISTS students_family_idx ON students (family_id);
+
+-- One call action can cover several siblings: one row per child, same call_group.
+ALTER TABLE calls ADD COLUMN IF NOT EXISTS call_group TEXT;
+ALTER TABLE calls ADD COLUMN IF NOT EXISTS promised_amount NUMERIC(12,2);
+UPDATE calls SET call_group = 'c' || id WHERE call_group IS NULL;
+CREATE INDEX IF NOT EXISTS calls_group_idx ON calls (call_group);
+
+CREATE TABLE IF NOT EXISTS follow_ups (
+    id                 BIGSERIAL PRIMARY KEY,
+    student_id         BIGINT NOT NULL REFERENCES students(id),
+    kind               TEXT NOT NULL,     -- promise | part_payment | callback | retry | dispute | verify_payment | fix_number
+    due_date           DATE,
+    status             TEXT NOT NULL DEFAULT 'open',  -- open | done | missed | paid | cancelled
+    source_call_id     BIGINT REFERENCES calls(id) ON DELETE SET NULL,
+    closed_by_call_id  BIGINT REFERENCES calls(id) ON DELETE SET NULL,
+    balance_at_open    NUMERIC(12,2),
+    promised_amount    NUMERIC(12,2),
+    note               TEXT,
+    created_at         TIMESTAMPTZ NOT NULL DEFAULT now(),
+    closed_at          TIMESTAMPTZ,
+    close_reason       TEXT
+);
+-- never two open follow-ups for the same child
+CREATE UNIQUE INDEX IF NOT EXISTS follow_ups_one_open ON follow_ups (student_id) WHERE status = 'open';
+
+CREATE TABLE IF NOT EXISTS campaigns (
+    id            BIGSERIAL PRIMARY KEY,
+    name          TEXT NOT NULL,
+    filters       JSONB NOT NULL DEFAULT '{}'::jsonb,   -- medium / std / section
+    daily_target  INTEGER NOT NULL DEFAULT 40,
+    status        TEXT NOT NULL DEFAULT 'active',       -- active | closed
+    started_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
+    closed_at     TIMESTAMPTZ
+);
+
+CREATE TABLE IF NOT EXISTS settings (
+    key    TEXT PRIMARY KEY,
+    value  JSONB NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS message_drafts (
+    id            BIGSERIAL PRIMARY KEY,
+    family_id     BIGINT REFERENCES families(id),
+    student_ids   BIGINT[] NOT NULL,
+    lang          TEXT NOT NULL,
+    body          TEXT NOT NULL,
+    status        TEXT NOT NULL DEFAULT 'draft',   -- draft | approved | discarded  (nothing is ever sent)
+    edited        BOOLEAN NOT NULL DEFAULT FALSE,
+    left_out      JSONB NOT NULL DEFAULT '[]'::jsonb,  -- children not included and why (no verified amount, nothing due)
+    created_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
+    approved_at   TIMESTAMPTZ,
+    approved_by   TEXT
+);
+"""
+
+ALL_TABLES = ("message_drafts", "follow_ups", "campaigns", "settings", "messages", "calls", "review_items",
+              "fee_snapshots", "file_state", "students", "families", "sync_issues", "sync_runs")
 
 
 SCHOOL_TIMEZONE = "Asia/Kolkata"  # "today" for follow-ups and calls means the school's today
@@ -130,3 +200,6 @@ def connect(url: str) -> psycopg.Connection:
 def init_db(conn: psycopg.Connection) -> None:
     with conn.transaction():
         conn.execute(SCHEMA)
+        conn.execute(MIGRATIONS)
+    from .families import ensure_families  # local import: families uses this module
+    ensure_families(conn)

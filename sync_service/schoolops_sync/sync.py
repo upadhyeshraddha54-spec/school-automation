@@ -108,7 +108,7 @@ def build_plan(conn, cfg: Config, pf: ParsedFile) -> Plan:
         ex = existing.get(key)
         if ex:
             changes = {}
-            for fld in ("contact", "sr_no", "medium", "std", "section", "student_ext_id"):
+            for fld in ("contact", "sr_no", "medium", "std", "section", "student_ext_id", "parent_name", "family_ext_id"):
                 new = getattr(r, fld) if fld != "section" else (r.section or "")
                 if new is not None and new != ex.get(fld):
                     changes[fld] = new
@@ -159,6 +159,7 @@ def build_plan(conn, cfg: Config, pf: ParsedFile) -> Plan:
                 "details": {
                     "row": {"name": r.name, "sr_no": r.sr_no, "medium": r.medium, "std": r.std,
                             "section": r.section, "contact": r.contact, "student_ext_id": r.student_ext_id,
+                            "parent_name": r.parent_name, "family_ext_id": r.family_ext_id,
                             "identity_key": identity_key(r), "fees": _fees(r), "raw": r.raw},
                     "candidates": [{"id": c["id"], "name": c["name"], "sr_no": c["sr_no"]} for c in cands],
                     "file": pf.path.name, "sheet": r.sheet, "row_number": r.row_number,
@@ -198,10 +199,11 @@ def insert_snapshot(conn, student_id: int, run_id: int | None, row_fees: dict, r
 def insert_student(conn, row: dict, file_name: str, sheet: str) -> int:
     rec = conn.execute(
         """INSERT INTO students (identity_key, student_ext_id, medium, std, section, sr_no, name, contact,
-                                 source_file, source_sheet)
+                                 parent_name, family_ext_id, source_file, source_sheet)
            VALUES (%(identity_key)s, %(student_ext_id)s, %(medium)s, %(std)s, %(section)s, %(sr_no)s,
-                   %(name)s, %(contact)s, %(file)s, %(sheet)s) RETURNING id""",
-        {**row, "section": row.get("section") or "", "file": file_name, "sheet": sheet},
+                   %(name)s, %(contact)s, %(parent_name)s, %(family_ext_id)s, %(file)s, %(sheet)s) RETURNING id""",
+        {"parent_name": None, "family_ext_id": None, **row, "section": row.get("section") or "",
+         "file": file_name, "sheet": sheet},
     ).fetchone()
     return rec["id"]
 
@@ -211,7 +213,8 @@ def apply_plan(conn, pf: ParsedFile, plan: Plan, run_id: int) -> None:
     for r in plan.new:
         sid = insert_student(conn, {"identity_key": identity_key(r), "student_ext_id": r.student_ext_id,
                                     "medium": r.medium, "std": r.std, "section": r.section, "sr_no": r.sr_no,
-                                    "name": r.name, "contact": r.contact}, fname, r.sheet)
+                                    "name": r.name, "contact": r.contact, "parent_name": r.parent_name,
+                                    "family_ext_id": r.family_ext_id}, fname, r.sheet)
         insert_snapshot(conn, sid, run_id, _fees(r), r.raw)
     for ex, r, changes in plan.matched:
         sets = ", ".join(f"{k} = %({k})s" for k in changes)
@@ -242,6 +245,20 @@ def apply_plan(conn, pf: ParsedFile, plan: Plan, run_id: int) -> None:
     )
 
 
+def _detect_rename(conn, path: Path, file_hash: str) -> str | None:
+    """A file with identical content whose old path no longer exists -> treat as renamed/moved."""
+    me = str(path.resolve())
+    if conn.execute("SELECT 1 FROM file_state WHERE path=%s", (me,)).fetchone():
+        return None
+    for r in conn.execute("SELECT path FROM file_state WHERE last_hash=%s", (file_hash,)).fetchall():
+        if not Path(r["path"]).exists():
+            with conn.transaction():
+                conn.execute("UPDATE file_state SET path=%s WHERE path=%s", (me, r["path"]))
+            log.info("Detected rename/move: %s -> %s", r["path"], me)
+            return Path(r["path"]).name
+    return None
+
+
 def _start_run(conn, path: Path, dry_run: bool, trigger: str, file_hash: str | None) -> int:
     with conn.transaction():
         return conn.execute(
@@ -269,7 +286,12 @@ def sync_file(conn, cfg: Config, path: str | Path, *, dry_run: bool | None = Non
         if st and st["last_hash"] == pf.file_hash:
             return {"file": path.name, "status": "unchanged"}
 
+    renamed_from = None
+    if not dry and pf.file_hash:
+        renamed_from = _detect_rename(conn, path, pf.file_hash)
     run_id = _start_run(conn, path, dry, trigger, pf.file_hash)
+    if renamed_from:
+        pf.add("info", "file_renamed", f"Same file as '{renamed_from}', which is no longer there (renamed or moved).")
     with conn.transaction():
         for i in pf.issues:
             conn.execute(
@@ -300,6 +322,11 @@ def sync_file(conn, cfg: Config, path: str | Path, *, dry_run: bool | None = Non
             return summary
         with conn.transaction():
             apply_plan(conn, pf, plan, run_id)
+        from .families import ensure_families, suggest_siblings
+        from .followups import refresh_follow_ups
+        ensure_families(conn)
+        summary["possible_siblings"] = suggest_siblings(conn, run_id)
+        summary["follow_ups_closed_paid"] = refresh_follow_ups(conn)
         summary["status"] = "applied"
         _finish_run(conn, run_id, "applied", summary)
         log.info("SYNCED %s: %s", path.name, plan.counts())
@@ -314,7 +341,11 @@ def sync_file(conn, cfg: Config, path: str | Path, *, dry_run: bool | None = Non
 
 def list_workbooks(cfg: Config, folder: Path | None = None) -> list[Path]:
     folder = Path(folder or cfg.watch_folder)
-    return sorted(p for p in folder.iterdir() if p.is_file() and is_workbook_name(p.name, cfg.file_patterns))
+    uploads = Path(cfg.upload_folder).resolve()
+    it = folder.rglob("*") if cfg.recursive else folder.iterdir()
+    return sorted(p for p in it if p.is_file() and is_workbook_name(p.name, cfg.file_patterns)
+                  and not any(part.startswith(".") for part in p.relative_to(folder).parts[:-1])
+                  and uploads not in p.resolve().parents)
 
 
 def sync_folder(conn, cfg: Config, folder: Path | None = None, *, dry_run: bool | None = None,

@@ -7,18 +7,11 @@ from __future__ import annotations
 
 from decimal import Decimal
 
-# Same outcomes as the Fees Calling Desk buttons.
-OUTCOMES = {
-    "will_pay": "Will pay",
-    "gave_date": "Gave a date",
-    "already_paid": "Says already paid",   # NOT marked paid: office must verify in Excel
-    "call_later": "Call later",
-    "no_answer": "No answer",
-    "phone_off": "Phone off",
-    "wrong_number": "Wrong number",
-    "complaint": "Has a complaint",
-}
-NEEDS_DATE = {"gave_date"}
+from .followups import OUTCOMES as _OUTCOMES
+
+# Labels shown to staff (ids stay stable for older records)
+OUTCOMES = {k: v.label for k, v in _OUTCOMES.items()}
+NEEDS_DATE = {k for k, v in _OUTCOMES.items() if v.date_required}
 
 LANGS = {"en": "English", "hi": "हिन्दी", "mr": "मराठी"}
 
