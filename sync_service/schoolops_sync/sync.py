@@ -23,6 +23,7 @@ from pathlib import Path
 from psycopg.types.json import Jsonb
 
 from .config import Config
+from .db import SYNC_LOCK
 from .reader import ParsedFile, StudentRow, identity_key, norm_key, read_workbook
 
 log = logging.getLogger("schoolops.sync")
@@ -187,13 +188,35 @@ def _review_hash(item: dict) -> str:
     return _hash({"kind": item["kind"], **core})
 
 
-def insert_snapshot(conn, student_id: int, run_id: int | None, row_fees: dict, raw: dict, source="excel"):
-    conn.execute(
+FEE_COLS = ("total_fee", "discount", "paid", "balance")
+
+
+def insert_snapshot(conn, student_id: int, run_id: int | None, row_fees: dict, raw: dict, source="excel") -> int | None:
+    """Append a fee snapshot unless it is identical to the latest one (idempotent), and record a
+    payment when Excel shows more paid (or, without a Paid column, a lower balance with the same total).
+    The payments table allows one payment per snapshot, so nothing is ever counted twice."""
+    vals = {k: (None if row_fees.get(k) is None else Decimal(str(row_fees[k]))) for k in FEE_COLS}
+    prev = conn.execute("SELECT * FROM fee_snapshots WHERE student_id=%s ORDER BY id DESC LIMIT 1",
+                        (student_id,)).fetchone()
+    if prev and all(prev[k] == vals[k] for k in FEE_COLS):
+        return None
+    snap = conn.execute(
         """INSERT INTO fee_snapshots (student_id, run_id, source, total_fee, discount, paid, balance, raw)
-           VALUES (%s,%s,%s,%s,%s,%s,%s,%s)""",
-        (student_id, run_id, source, row_fees.get("total_fee"), row_fees.get("discount"),
-         row_fees.get("paid"), row_fees["balance"], Jsonb(raw)),
-    )
+           VALUES (%s,%s,%s,%s,%s,%s,%s,%s) RETURNING id""",
+        (student_id, run_id, source, vals["total_fee"], vals["discount"], vals["paid"], vals["balance"], Jsonb(raw)),
+    ).fetchone()["id"]
+    if prev:
+        amount, basis = None, None
+        if vals["paid"] is not None and prev["paid"] is not None and vals["paid"] > prev["paid"]:
+            amount, basis = vals["paid"] - prev["paid"], "paid_increased"
+        elif prev["balance"] is not None and vals["balance"] < prev["balance"] \
+                and vals["total_fee"] == prev["total_fee"] and vals["discount"] == prev["discount"]:
+            # only Balance was lowered (same total, same discount): counted as a payment, once
+            amount, basis = prev["balance"] - vals["balance"], "balance_decreased"
+        if amount:
+            conn.execute("""INSERT INTO payments (student_id, snapshot_id, amount, basis) VALUES (%s,%s,%s,%s)
+                            ON CONFLICT (snapshot_id) DO NOTHING""", (student_id, snap, amount, basis))
+    return snap
 
 
 def insert_student(conn, row: dict, file_name: str, sheet: str) -> int:
@@ -208,7 +231,7 @@ def insert_student(conn, row: dict, file_name: str, sheet: str) -> int:
     return rec["id"]
 
 
-def apply_plan(conn, pf: ParsedFile, plan: Plan, run_id: int) -> None:
+def apply_plan(conn, pf: ParsedFile, plan: Plan, run_id: int, record_state: bool = True) -> None:
     fname = pf.path.name
     for r in plan.new:
         sid = insert_student(conn, {"identity_key": identity_key(r), "student_ext_id": r.student_ext_id,
@@ -237,6 +260,8 @@ def apply_plan(conn, pf: ParsedFile, plan: Plan, run_id: int) -> None:
         )
     for m in plan.missing:
         conn.execute("UPDATE students SET missing_since = now() WHERE id = %s AND missing_since IS NULL", (m["id"],))
+    if not record_state:  # uploads: staged copies are not part of the watched folder
+        return
     conn.execute(
         """INSERT INTO file_state (path, last_hash, last_synced_at, last_run_id) VALUES (%s,%s,now(),%s)
            ON CONFLICT (path) DO UPDATE SET last_hash = EXCLUDED.last_hash,
@@ -274,7 +299,7 @@ def _finish_run(conn, run_id: int, status: str, summary: dict) -> None:
 
 
 def sync_file(conn, cfg: Config, path: str | Path, *, dry_run: bool | None = None,
-              trigger: str = "manual", force: bool = False) -> dict:
+              trigger: str = "manual", force: bool = False, record_state: bool = True) -> dict:
     path = Path(path)
     dry = cfg.dry_run if dry_run is None else dry_run
     cfg.assert_sync_allowed(path.parent)
@@ -287,7 +312,7 @@ def sync_file(conn, cfg: Config, path: str | Path, *, dry_run: bool | None = Non
             return {"file": path.name, "status": "unchanged"}
 
     renamed_from = None
-    if not dry and pf.file_hash:
+    if not dry and pf.file_hash and record_state:
         renamed_from = _detect_rename(conn, path, pf.file_hash)
     run_id = _start_run(conn, path, dry, trigger, pf.file_hash)
     if renamed_from:
@@ -312,16 +337,20 @@ def sync_file(conn, cfg: Config, path: str | Path, *, dry_run: bool | None = Non
         return summary
 
     try:
-        plan = build_plan(conn, cfg, pf)
-        conn.commit()
-        summary = {**base, **plan.counts()}
         if dry:
+            plan = build_plan(conn, cfg, pf)
+            summary = {**base, **plan.counts()}
             summary.update(status="dry_run", preview=plan.preview())
             _finish_run(conn, run_id, "dry_run", summary)
             log.info("DRY RUN %s: %s", path.name, plan.counts())
             return summary
         with conn.transaction():
-            apply_plan(conn, pf, plan, run_id)
+            # serialise all syncs: plan and apply see the same data, so two syncs of the same
+            # file (watcher + OneDrive + upload) can never insert the same fees or payments twice
+            conn.execute("SELECT pg_advisory_xact_lock(%s)", (SYNC_LOCK,))
+            plan = build_plan(conn, cfg, pf)
+            summary = {**base, **plan.counts()}
+            apply_plan(conn, pf, plan, run_id, record_state=record_state)
         from .families import ensure_families, suggest_siblings
         from .followups import refresh_follow_ups
         ensure_families(conn)

@@ -91,9 +91,11 @@ def edit(conn, draft_id: int, body: str) -> dict:
     if not body:
         raise DraftError("The message cannot be empty.")
     # editing an approved draft takes it back to "draft": it must be approved again
+    from .outreach import sms_parts
+    segments = sms_parts(body) if d.get("channel") == "sms" else d.get("segments")
     return conn.execute(
         """UPDATE message_drafts SET body=%s, edited=TRUE, status='draft', approved_at=NULL, approved_by=NULL,
-                  updated_at=now() WHERE id=%s RETURNING *""", (body, draft_id)).fetchone()
+                  segments=%s, updated_at=now() WHERE id=%s RETURNING *""", (body, segments, draft_id)).fetchone()
 
 
 def approve(conn, draft_id: int, by: str | None) -> dict:

@@ -59,6 +59,29 @@ confirmed = false
 balance_increase = "review"   # balance went UP since last sync -> hold for a person to check
 paid_decrease = "review"      # Paid amount went DOWN -> hold for a person to check
 
-[messaging]
-# No SMS/WhatsApp/email provider is built in. Drafts can be edited, approved and copied only.
+[onedrive]
+# Read the class files straight from OneDrive / SharePoint with Microsoft Graph (READ-ONLY).
+# Files are downloaded into watch_folder (above), which then acts as a local mirror. Never edit the mirror.
 enabled = false
+auth = "device_code"            # sign in once as the office user (python -m schoolops_sync onedrive-login)
+tenant_id = "organizations"     # TODO: your Microsoft 365 tenant ID or domain ("consumers" for a personal account)
+client_id = ""                  # TODO: Application (client) ID of the app registration (see README)
+drive_id = ""                   # empty = the signed-in user's own OneDrive
+folder_path = "School/Fees"     # TODO: folder inside that drive
+folder_item_id = ""             # OR: the id of a folder SHARED with you (then drive_id is required)
+recursive = true
+poll_minutes = 10
+token_cache = "data/onedrive_token.json"   # git-ignored, readable only by you
+
+[messaging]
+# No SMS/WhatsApp/email provider is connected. Drafts are prepared for staff to edit, approve and copy.
+enabled = false
+# Optional: names of your approved WhatsApp templates / DLT-registered SMS templates, shown on drafts.
+# whatsapp_templates = { mr = "fee_reminder_mr", hi = "fee_reminder_hi", en = "fee_reminder_en" }
+# sms_templates = { mr = "1107xxxxxxxxxxxxxx", hi = "", en = "" }
+# Optional: prepare drafts automatically every day (still need approval, still not sent)
+auto_drafts = false
+auto_drafts_time = "09:00"
+auto_drafts_lists = ["missed_promise", "due_soon"]   # also: due_today, not_called, all_unpaid
+auto_drafts_channels = ["whatsapp", "sms"]
+auto_drafts_language = "mr"

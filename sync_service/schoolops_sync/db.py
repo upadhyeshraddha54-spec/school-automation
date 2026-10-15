@@ -168,6 +168,29 @@ CREATE TABLE IF NOT EXISTS settings (
     value  JSONB NOT NULL
 );
 
+-- Payments seen in Excel: one row per fee snapshot at most (never counted twice)
+CREATE TABLE IF NOT EXISTS payments (
+    id           BIGSERIAL PRIMARY KEY,
+    student_id   BIGINT NOT NULL REFERENCES students(id),
+    snapshot_id  BIGINT NOT NULL UNIQUE REFERENCES fee_snapshots(id),
+    amount       NUMERIC(12,2) NOT NULL CHECK (amount > 0),
+    basis        TEXT NOT NULL,          -- 'paid_increased' | 'balance_decreased'
+    detected_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS payments_student_idx ON payments (student_id, detected_at);
+
+-- OneDrive (Microsoft Graph) files mirrored read-only into the local folder
+CREATE TABLE IF NOT EXISTS onedrive_items (
+    item_id       TEXT PRIMARY KEY,
+    name          TEXT NOT NULL,
+    rel_path      TEXT NOT NULL,
+    ctag          TEXT,
+    size          BIGINT,
+    modified_at   TIMESTAMPTZ,
+    downloaded_at TIMESTAMPTZ,
+    deleted_at    TIMESTAMPTZ
+);
+
 CREATE TABLE IF NOT EXISTS message_drafts (
     id            BIGSERIAL PRIMARY KEY,
     family_id     BIGINT REFERENCES families(id),
@@ -182,9 +205,19 @@ CREATE TABLE IF NOT EXISTS message_drafts (
     approved_at   TIMESTAMPTZ,
     approved_by   TEXT
 );
+ALTER TABLE message_drafts ADD COLUMN IF NOT EXISTS channel TEXT NOT NULL DEFAULT 'manual';  -- manual | whatsapp | sms
+ALTER TABLE message_drafts ADD COLUMN IF NOT EXISTS phone TEXT;
+ALTER TABLE message_drafts ADD COLUMN IF NOT EXISTS reason TEXT;          -- which list it came from
+ALTER TABLE message_drafts ADD COLUMN IF NOT EXISTS batch_id TEXT;
+ALTER TABLE message_drafts ADD COLUMN IF NOT EXISTS template_name TEXT;   -- WhatsApp approved template / SMS DLT template
+ALTER TABLE message_drafts ADD COLUMN IF NOT EXISTS segments INTEGER;     -- SMS parts
+ALTER TABLE message_drafts ADD COLUMN IF NOT EXISTS created_on DATE NOT NULL DEFAULT current_date;
+-- at most one live WhatsApp and one live SMS draft per parent per day
+CREATE UNIQUE INDEX IF NOT EXISTS drafts_one_per_family_day ON message_drafts (family_id, channel, created_on)
+    WHERE status <> 'discarded' AND channel IN ('whatsapp', 'sms') AND family_id IS NOT NULL;
 """
 
-ALL_TABLES = ("message_drafts", "follow_ups", "campaigns", "settings", "messages", "calls", "review_items",
+ALL_TABLES = ("payments", "onedrive_items", "message_drafts", "follow_ups", "campaigns", "settings", "messages", "calls", "review_items",
               "fee_snapshots", "file_state", "students", "families", "sync_issues", "sync_runs")
 
 
@@ -197,8 +230,12 @@ def connect(url: str) -> psycopg.Connection:
                            options=f"-c timezone={SCHOOL_TIMEZONE} -c client_encoding=UTF8")
 
 
+SYNC_LOCK = 7_310_001  # one sync applies at a time (watcher, OneDrive poller, uploads, reconcile)
+
+
 def init_db(conn: psycopg.Connection) -> None:
     with conn.transaction():
+        conn.execute("SELECT pg_advisory_xact_lock(7310002)")  # two app starts can't migrate at once
         conn.execute(SCHEMA)
         conn.execute(MIGRATIONS)
     from .families import ensure_families  # local import: families uses this module

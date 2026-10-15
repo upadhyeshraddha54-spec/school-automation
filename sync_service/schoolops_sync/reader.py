@@ -259,6 +259,19 @@ def read_workbook(path: str | Path, cfg: Config) -> ParsedFile:
 
 def _read_sheet(pf: ParsedFile, cfg: Config, stem: str, sheet: str, rows: list[tuple]) -> None:
     hidx = cfg.header_row - 1
+    # Safety net: if the headings are not on the configured row (e.g. someone inserted a row
+    # above them), look in the first 8 rows for the row that has BOTH name and balance headings.
+    def _has_core(row) -> bool:
+        keys = {norm_key(h) for h in (row or ()) if h is not None}
+        return all(norm_key(cfg.columns[f]) in keys for f in ("student_name", "balance"))
+    if not (len(rows) > hidx and _has_core(rows[hidx])):
+        for r in range(min(len(rows), 8)):
+            if _has_core(rows[r]):
+                pf.add("warning", "headings_moved",
+                       f"Headings found on row {r + 1} instead of row {cfg.header_row}. Read from there.", sheet)
+                hidx = r
+                break
+    data_start = hidx + (cfg.first_data_row - cfg.header_row)
     header = rows[hidx] if len(rows) > hidx else ()
     found: dict[str, int] = {}
     hnorm = [norm_key(h) for h in header]
@@ -284,7 +297,7 @@ def _read_sheet(pf: ParsedFile, cfg: Config, stem: str, sheet: str, rows: list[t
         return
 
     pf.sheets_read.append(sheet)
-    for r in range(cfg.first_data_row - 1, len(rows)):
+    for r in range(data_start, len(rows)):
         row = rows[r]
         excel_row = r + 1
         if row is None or all(v is None or (isinstance(v, str) and not v.strip()) for v in row):

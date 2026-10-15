@@ -81,6 +81,7 @@ it covered and restores the previous follow-up.
 | `DATABASE_URL` | PostgreSQL connection, overrides `database_url` in the config | from config |
 | `SCHOOLOPS_WATCH_FOLDER` | Folder with the class files, overrides `watch_folder` | from config |
 | `TEST_DATABASE_URL` | Separate database for `pytest` | `postgresql://postgres@localhost:5433/schoolops_test` |
+| `ONEDRIVE_CLIENT_SECRET` | Only for `auth = "client_credentials"` | – |
 
 No secrets are needed for the local Mac setup (Homebrew PostgreSQL uses your Mac user, local socket only).
 If you set a database password, put it in `DATABASE_URL` or in a `.env`/`config.toml` that is **not committed**
@@ -93,7 +94,44 @@ createdb -E UTF8 schoolops
 .venv/bin/python -m schoolops_sync --config config.toml init-db
 ```
 
-### Connecting the real OneDrive folder (when you are ready)
+### OneDrive through Microsoft Graph (read-only)
+The app can read the class files directly from OneDrive/SharePoint. It only ever sends GET requests
+(no upload, rename or delete), downloads changed files (by content tag) into `watch_folder`, and runs
+the normal safe sync on them. Renamed/moved files keep their history; files removed in OneDrive are
+moved to `watch_folder/.removed/` and their students are kept.
+
+One-time setup (needs a Microsoft 365 admin, ~10 minutes):
+1. portal.azure.com → **Microsoft Entra ID → App registrations → New registration**. Name "SchoolOps
+   Fees (read-only)", account type "this organization only". No redirect URI.
+2. **Authentication** → "Allow public client flows" = **Yes** (needed for device sign-in).
+3. **API permissions** → Microsoft Graph → *Delegated* → **Files.Read.All** → Grant admin consent.
+4. Copy the **Application (client) ID** and **Directory (tenant) ID** into `[onedrive]` in `config.toml`,
+   set `folder_path` (or `drive_id` + `folder_item_id` for a folder shared with the office user), `enabled = true`.
+5. `python -m schoolops_sync --config config.toml onedrive-login` → open the link, enter the code, sign in as
+   the office user. The token is stored in `data/onedrive_token.json` (git-ignored).
+6. `python -m schoolops_sync --config config.toml onedrive-sync` (dry run) → check the report → `serve`.
+   `serve` then checks OneDrive every `poll_minutes`. Status and "Sync from OneDrive now" are in
+   *Students & Fees → Excel sync & review*.
+
+(App-only access without a user: `auth = "client_credentials"`, an application permission
+`Files.Read.All`, admin consent, and the secret in the `ONEDRIVE_CLIENT_SECRET` environment variable.)
+
+### WhatsApp and SMS reminder drafts (never sent)
+*Messages → Prepare reminders for a whole list*: missed promises, due today, promised in the next 3 days,
+not contacted yet, or all unpaid. One draft per parent per channel per day (siblings combined), using
+only amounts from Excel. SMS drafts show their length and number of SMS parts (Hindi/Marathi use
+70 characters per part). Staff edit, approve one or many, and copy. `POST /drafts/{id}/send` always refuses:
+no provider is connected. Real sending later needs a WhatsApp Business (Cloud API) account with approved
+templates and/or a DLT-registered SMS sender and templates — put their names in `[messaging]`.
+The same follow-up list can be downloaded as a spreadsheet from the Dashboard ("Download today's list").
+
+### Payments
+Payments are only learned from Excel: when Paid goes up (or, without other changes, Balance goes down).
+Each change is recorded once (`payments`, one row per fee snapshot); identical re-syncs add nothing,
+and simultaneous syncs (watcher, OneDrive, Add Excel) are serialised so nothing is counted twice.
+A bigger discount is not a payment. Campaign "collected" totals use these payment records.
+
+### Connecting a local OneDrive folder instead (no Graph)
 1. Install the **OneDrive** app on the Mac and sync the shared fees folder. It appears under
    `~/Library/CloudStorage/OneDrive-<Organisation>/…`. In Finder, right-click the folder → **Always Keep on This Device**
    (so files are real files, not online-only placeholders).
@@ -108,8 +146,7 @@ createdb -E UTF8 schoolops
 6. Only when the report is right: `dry_run = false`, then
    `.venv/bin/python -m schoolops_sync --config config.toml serve` (app + watcher + reconciliation every 30 min).
 
-The Microsoft Graph (cloud API) integration is **not** built; the app relies on the OneDrive desktop app
-keeping the folder synced on this Mac.
+(Use either this local folder **or** the Graph integration above, not both.)
 
 ### Commands
 | Command | What it does |
@@ -118,7 +155,9 @@ keeping the folder synced on this Mac.
 | `make-synthetic FOLDER` | Create fake class workbooks (with sibling pairs) |
 | `check` | Dry run of the whole folder; prints the report; writes nothing |
 | `sync --apply [--file NAME] [--force]` | Apply changes from the folder |
-| `serve [--no-watch] [--port N]` | Start the app/API (and the watcher unless `--no-watch`) |
+| `serve [--no-watch] [--port N]` | Start the app/API (and the watcher or OneDrive poller unless `--no-watch`) |
+| `onedrive-login` | Sign in to Microsoft once (device code, read-only) |
+| `onedrive-sync [--apply]` | Download changed files from OneDrive and sync them (dry run unless `--apply`) |
 
 ## Backup and recovery
 ```bash
@@ -142,6 +181,7 @@ and combined balances, call outcomes and follow-up scheduling, missed promises, 
 undo, campaigns and targets, message drafts and approval, uploads, the watcher, and the API.
 
 ## Not built yet (needs your decision or credentials)
-* Real SMS/WhatsApp/email sending (needs a provider account; `[messaging] enabled` stays `false`).
-* Microsoft Graph / OneDrive cloud API (the OneDrive desktop app is used instead).
+* Real SMS/WhatsApp sending: needs provider accounts and approved templates; `[messaging] enabled` stays `false`
+  and the send endpoint refuses regardless.
+* Live Microsoft sign-in has not been tested against a real tenant (tests use a fake Graph server).
 * Real column mapping and payment rules (need the school's confirmation).

@@ -46,6 +46,21 @@ def _is_synthetic(path: Path) -> bool:
     return any(isinstance(v, str) and "SYNTHETIC" in v.upper() for v in firsts)
 
 
+def is_synthetic_file(path: Path) -> bool:
+    """True only for workbooks made by the synthetic generator (.xlsx or .xls)."""
+    path = Path(path)
+    if path.suffix.lower() != ".xls":
+        return _is_synthetic(path)
+    conv = path.with_name(".syn-" + uuid.uuid4().hex + ".xlsx")
+    try:
+        _xls_to_xlsx(path, conv)
+        return _is_synthetic(conv)
+    except Exception:
+        return False
+    finally:
+        conv.unlink(missing_ok=True)
+
+
 def _staging(cfg: Config, token: str) -> Path:
     if not _TOKEN.match(token or ""):
         raise ImportError_("Unknown upload. Please add the files again.")
@@ -78,11 +93,23 @@ def _columns(path: Path, cfg: Config) -> list[dict]:
     return out
 
 
+def _cleanup_stale(cfg: Config, max_age_hours: float = 24) -> None:
+    """Remove staged copies of uploads that were never imported or cancelled."""
+    import time
+    root = Path(cfg.upload_folder).resolve()
+    if not root.is_dir():
+        return
+    for d in root.iterdir():
+        if d.is_dir() and _TOKEN.match(d.name) and time.time() - d.stat().st_mtime > max_age_hours * 3600:
+            shutil.rmtree(d, ignore_errors=True)
+
+
 def preview_upload(conn, cfg: Config, files: list[tuple[str, bytes]]) -> dict:
     if not files:
         raise ImportError_("Choose at least one Excel file.")
     if len(files) > MAX_FILES:
         raise ImportError_(f"Please add at most {MAX_FILES} files at a time.")
+    _cleanup_stale(cfg)
     token = uuid.uuid4().hex
     folder = _staging(cfg, token)
     folder.mkdir(parents=True, exist_ok=True)
@@ -147,7 +174,7 @@ def preview_upload(conn, cfg: Config, files: list[tuple[str, bytes]]) -> dict:
         if pf.fatal:
             r["problem"] = pf.issues[0].message if pf.issues else "The file could not be read."
             continue
-        summary = sync_file(conn, cfg, p, dry_run=True, trigger="upload", force=True)
+        summary = sync_file(conn, cfg, p, dry_run=True, trigger="upload", force=True, record_state=False)
         r["plan"] = {k: summary.get(k, 0) for k in
                      ("new_students", "fee_updates", "needs_review", "unchanged", "missing_from_file", "rows_not_synced")}
         r["importable"] = bool(pf.sheets_read)
@@ -171,7 +198,7 @@ def confirm_import(conn, cfg: Config, token: str, file_names: list[str]) -> dict
         p = folder / _safe_name(name)
         if p.parent != folder or not p.is_file():
             raise ImportError_(f"{name} is not part of this upload.")
-        out.append(sync_file(conn, cfg, p, dry_run=False, trigger="upload", force=True))
+        out.append(sync_file(conn, cfg, p, dry_run=False, trigger="upload", force=True, record_state=False))
     shutil.rmtree(folder, ignore_errors=True)  # our staged copies only
     return {"files": out}
 

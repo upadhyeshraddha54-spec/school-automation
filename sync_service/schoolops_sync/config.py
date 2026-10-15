@@ -58,6 +58,8 @@ class Config:
     upload_folder: str = "data/uploads"  # staged copies of files added from the app
     recursive: bool = False  # also read class files inside sub-folders (e.g. one OneDrive folder per medium)
     messaging_enabled: bool = False  # real sending needs a provider; none is built in
+    onedrive: dict = field(default_factory=dict)   # raw [onedrive] table (see onedrive.OneDriveConfig)
+    messaging: dict = field(default_factory=dict)  # raw [messaging] table (templates, auto drafts)
     polling: bool = False  # true for network/shared drives where file events are unreliable
     school_name: str = "School"
     header_row: int = 2
@@ -136,6 +138,8 @@ def load_config(path: str | os.PathLike) -> Config:
         polling=bool(svc.get("polling", False)),
         recursive=bool(svc.get("recursive", False)),
         messaging_enabled=bool(raw.get("messaging", {}).get("enabled", False)),
+        onedrive=dict(raw.get("onedrive", {})),
+        messaging=dict(raw.get("messaging", {})),
         school_name=svc.get("school_name", "School"),
         header_row=int(layout.get("header_row", 2)),
         first_data_row=int(layout.get("first_data_row", 3)),

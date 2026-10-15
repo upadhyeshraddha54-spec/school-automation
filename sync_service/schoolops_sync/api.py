@@ -11,7 +11,7 @@ from typing import Literal
 
 from fastapi import Depends, FastAPI, File, HTTPException, Query, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import RedirectResponse
+from fastapi.responses import RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
 from psycopg.types.json import Jsonb
 from pydantic import BaseModel, Field
@@ -19,6 +19,8 @@ from pydantic import BaseModel, Field
 from . import drafts as dr
 from . import followups as fx
 from . import messages as msg
+from . import onedrive as od
+from . import outreach as ox
 from .config import Config, NotAllowed
 from .db import connect, init_db
 from .families import FamilyError, link_student, merge_families, unlink_student
@@ -102,18 +104,45 @@ class CampaignIn(BaseModel):
     daily_target: int = Field(DEFAULT_DAILY_TARGET, ge=1, le=1000)
 
 
+class BatchIn(BaseModel):
+    list: str
+    channels: list[Literal["whatsapp", "sms"]] = ["whatsapp", "sms"]
+    lang: Literal["en", "hi", "mr"] = "mr"
+    medium: str | None = None
+    std: str | None = None
+    section: str | None = None
+    use_campaign: bool = True
+
+
+class DraftIds(BaseModel):
+    ids: list[int] = Field(..., min_length=1, max_length=500)
+    by: str | None = None
+
+
 class TargetIn(BaseModel):
     daily_target: int = Field(..., ge=1, le=1000)
 
 
-def create_app(cfg: Config, *, start_watcher: bool = True) -> FastAPI:
-    state: dict = {"watcher": None}
+def create_app(cfg: Config, *, start_watcher: bool = True, graph_client_factory=None) -> FastAPI:
+    state: dict = {"watcher": None, "poller": None, "auto": None}
+    oc = od.OneDriveConfig.from_raw(cfg.onedrive)
+
+    def graph_client():
+        if graph_client_factory:
+            return graph_client_factory()
+        return od.GraphClient(od.MsalTokenProvider(oc))
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
         with connect(cfg.database_url) as c:
             init_db(c)
+        if start_watcher and oc.enabled:  # OneDrive mode: the poller downloads and syncs
+            state["poller"] = od.OneDrivePoller(cfg, oc, graph_client)
+            state["poller"].start()
         if start_watcher:
+            state["auto"] = ox.AutoDrafts(cfg, connect)
+            state["auto"].start()
+        if start_watcher and not oc.enabled:
             try:
                 w = FolderWatcher(cfg, polling=cfg.polling)
                 w.start()
@@ -125,8 +154,9 @@ def create_app(cfg: Config, *, start_watcher: bool = True) -> FastAPI:
                 log.error("Watcher not started, folder missing: %s", exc)
                 state["watcher_error"] = f"Folder not found: {cfg.watch_folder}"
         yield
-        if state["watcher"]:
-            state["watcher"].stop()
+        for k in ("watcher", "poller", "auto"):
+            if state[k]:
+                state[k].stop()
 
     app = FastAPI(title="SchoolOps Fees Calling Desk", version="0.2.0", lifespan=lifespan)
     app.add_middleware(CORSMiddleware, allow_origins=["http://127.0.0.1:8000", "http://localhost:8000"],
@@ -223,6 +253,23 @@ def create_app(cfg: Config, *, start_watcher: bool = True) -> FastAPI:
             return (approve if action == "approve" else reject)(conn, item_id, by)
         except ReviewError as exc:
             raise HTTPException(409, str(exc))
+
+    # ------------------------------------------------------------------ OneDrive (Microsoft Graph, read-only)
+    @app.get("/onedrive/status")
+    def onedrive_status(conn=Depends(db)):
+        return od.status(conn, cfg, oc)
+
+    @app.post("/onedrive/sync")
+    def onedrive_sync(conn=Depends(db)):
+        if not oc.enabled:
+            raise HTTPException(409, "OneDrive is not switched on ([onedrive] enabled = false).")
+        dry = cfg.dry_run or not cfg.test_mode  # from the app: real data only as a dry run
+        try:
+            return od.sync_from_onedrive(conn, cfg, oc, graph_client(), dry_run=dry)
+        except NotAllowed as exc:
+            raise HTTPException(409, str(exc))
+        except (od.OneDriveError, Exception) as exc:
+            raise HTTPException(502, f"OneDrive: {exc}")
 
     # ------------------------------------------------------------------ Add Excel (upload -> preview -> confirm)
     @app.post("/imports/preview")
@@ -325,6 +372,8 @@ def create_app(cfg: Config, *, start_watcher: bool = True) -> FastAPI:
         s["follow_ups"] = conn.execute("SELECT * FROM follow_ups WHERE student_id=%s ORDER BY id DESC", (sid,)).fetchall()
         for f in s["follow_ups"]:
             f["label"] = fx.FOLLOW_UP_LABELS.get(f["kind"], f["kind"])
+        s["payments"] = conn.execute("SELECT amount, basis, detected_at FROM payments WHERE student_id=%s "
+                                     "ORDER BY id DESC", (sid,)).fetchall()
         s["siblings"] = conn.execute(
             f"""SELECT s.id, s.name, {KLASS_SQL} AS klass, f.balance FROM students s
                 LEFT JOIN current_fees f ON f.student_id=s.id WHERE s.family_id=%s AND s.id<>%s ORDER BY s.id""",
@@ -596,9 +645,14 @@ def create_app(cfg: Config, *, start_watcher: bool = True) -> FastAPI:
             bad(exc)
 
     @app.get("/drafts")
-    def draft_list(status: str | None = None, page: int = Query(1, ge=1), page_size: int = Query(20, ge=1, le=100),
-                   conn=Depends(db)):
-        w, p = ("WHERE d.status = %(st)s", {"st": status}) if status else ("", {})
+    def draft_list(status: str | None = None, channel: str | None = None, batch_id: str | None = None,
+                   page: int = Query(1, ge=1), page_size: int = Query(20, ge=1, le=100), conn=Depends(db)):
+        conds, p = [], {}
+        for col, val in (("status", status), ("channel", channel), ("batch_id", batch_id)):
+            if val:
+                conds.append(f"d.{col} = %({col})s")
+                p[col] = val
+        w = ("WHERE " + " AND ".join(conds)) if conds else ""
         total = conn.execute(f"SELECT count(*) AS n FROM message_drafts d {w}", p).fetchone()["n"]
         items = conn.execute(
             f"""SELECT d.*, (SELECT string_agg(s.name, ', ' ORDER BY s.id) FROM students s
@@ -628,10 +682,65 @@ def create_app(cfg: Config, *, start_watcher: bool = True) -> FastAPI:
         except dr.DraftError as exc:
             bad(exc, 409)
 
+    @app.get("/drafts/lists")
+    def draft_lists(conn=Depends(db)):
+        camp = active_campaign(conn)
+        return [{"id": k, "label": v, "families": len(ox.select_families(conn, k, campaign=camp))}
+                for k, v in ox.LISTS.items()]
+
+    @app.post("/drafts/batch", status_code=201)
+    def draft_batch(req: BatchIn, conn=Depends(db)):
+        try:
+            with conn.transaction():
+                return ox.prepare_batch(conn, cfg, req.list, channels=req.channels, lang=req.lang, medium=req.medium,
+                                        std=req.std, section=req.section,
+                                        campaign=active_campaign(conn) if req.use_campaign else None)
+        except ox.OutreachError as exc:
+            bad(exc)
+
+    @app.post("/drafts/approve-many")
+    def drafts_approve_many(req: DraftIds, conn=Depends(db)):
+        done, skipped = [], []
+        for i in req.ids:
+            try:
+                dr.approve(conn, i, req.by)
+                done.append(i)
+            except dr.DraftError as exc:
+                skipped.append({"id": i, "why": str(exc)})
+        return {"approved": done, "skipped": skipped}
+
+    @app.post("/drafts/discard-many")
+    def drafts_discard_many(req: DraftIds, conn=Depends(db)):
+        for i in req.ids:
+            try:
+                dr.discard(conn, i)
+            except dr.DraftError:
+                pass
+        return {"discarded": req.ids}
+
+    @app.get("/queue.csv")
+    def queue_csv(std: str | None = None, medium: str | None = None, section: str | None = None, conn=Depends(db)):
+        """Today's follow-up list as a spreadsheet (one row per child, siblings next to each other)."""
+        import csv
+        import io
+        fx.refresh_follow_ups(conn)
+        q = fx.build_queue(conn, medium=medium, std=std, section=section, campaign=active_campaign(conn))
+        buf = io.StringIO()
+        w = csv.writer(buf)
+        w.writerow(["#", "Why", "Parent phone", "Student", "Class", "Sr. No.", "Balance (Excel)", "Next step", "Due",
+                    "Last call", "Family total"])
+        for n, f in enumerate(q["items"], 1):
+            for k in f["children"]:
+                w.writerow([n, f["reason"], ", ".join(f["phones"]), k["name"], k["klass"], k["sr_no"] or "",
+                            k["balance"], k["follow_up_label"] or "", k["fu_due"] or "",
+                            k["last_outcome_label"] or "", f["total_due"]])
+        return Response("\ufeff" + buf.getvalue(), media_type="text/csv; charset=utf-8",
+                        headers={"Content-Disposition": f'attachment; filename="follow-up-list-{date.today()}.csv"'})
+
     @app.post("/drafts/{did}/send")
     def draft_send(did: int):
-        raise HTTPException(409, "Sending is turned off. No SMS/WhatsApp/email provider is configured. "
-                                 "Copy the approved text and send it yourself if needed.")
+        raise HTTPException(409, "Sending is turned off. WhatsApp and SMS drafts are for staff to review and copy; "
+                                 "no provider is connected and nothing is sent by this app.")
 
     web = Path(__file__).resolve().parent.parent / "web"
     if web.is_dir():

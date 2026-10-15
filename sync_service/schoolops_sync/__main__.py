@@ -4,7 +4,9 @@
   python -m schoolops_sync --config config.toml make-synthetic ./synthetic_school
   python -m schoolops_sync --config config.toml check            # dry run of the whole folder
   python -m schoolops_sync --config config.toml sync --apply     # really write to the database
-  python -m schoolops_sync --config config.toml serve            # API + folder watcher
+  python -m schoolops_sync --config config.toml serve            # API + folder watcher (or OneDrive poller)
+  python -m schoolops_sync --config config.toml onedrive-login   # sign in to Microsoft once (read-only access)
+  python -m schoolops_sync --config config.toml onedrive-sync    # download changed files + dry run (add --apply)
 """
 from __future__ import annotations
 
@@ -47,6 +49,9 @@ def main(argv=None) -> int:
     s.add_argument("--apply", action="store_true", help="Write to the database (otherwise dry run).")
     s.add_argument("--file", help="Only this workbook (inside the watched folder).")
     s.add_argument("--force", action="store_true", help="Sync even if the file has not changed.")
+    sub.add_parser("onedrive-login", help="Sign in to Microsoft (device code). Read-only access.")
+    o = sub.add_parser("onedrive-sync", help="Download changed Excel files from OneDrive and sync them.")
+    o.add_argument("--apply", action="store_true", help="Write to the database (otherwise dry run).")
     v = sub.add_parser("serve")
     v.add_argument("--host", default="127.0.0.1")
     v.add_argument("--port", type=int, default=8000)
@@ -80,6 +85,19 @@ def main(argv=None) -> int:
                 else:
                     res = sync_folder(c, cfg, dry_run=dry, trigger="manual", force=getattr(a, "force", False))
             print(json.dumps(res, indent=2, default=str, ensure_ascii=False))
+        elif a.cmd in ("onedrive-login", "onedrive-sync"):
+            from . import onedrive as od
+            oc = od.OneDriveConfig.from_raw(cfg.onedrive)
+            tp = od.MsalTokenProvider(oc)
+            if a.cmd == "onedrive-login":
+                print("Signed in as", tp.login_device_code())
+                print("Done. The app can now read the OneDrive folder (read-only).")
+            else:
+                cfg.assert_sync_allowed()
+                with connect(cfg.database_url) as c:
+                    init_db(c)
+                    res = od.sync_from_onedrive(c, cfg, oc, od.GraphClient(tp), dry_run=not a.apply)
+                print(json.dumps(res, indent=2, default=str, ensure_ascii=False))
         elif a.cmd == "serve":
             import uvicorn
 
@@ -88,7 +106,13 @@ def main(argv=None) -> int:
     except NotAllowed as exc:
         print(f"Blocked for safety: {exc}", file=sys.stderr)
         return 3
-    except psycopg.OperationalError as exc:
+    except Exception as exc:
+        from .onedrive import OneDriveError
+        if isinstance(exc, OneDriveError):
+            print(f"OneDrive: {exc}", file=sys.stderr)
+            return 5
+        if not isinstance(exc, psycopg.OperationalError):
+            raise
         print(f"Cannot reach the database. Is PostgreSQL running and is database_url correct?\n{exc}", file=sys.stderr)
         return 4
     return 0

@@ -271,7 +271,8 @@ def campaign_progress(conn, c: dict) -> dict:
             SELECT count(DISTINCT family_id) FILTER (WHERE start_bal > 0) AS families_in_scope,
                    count(*) FILTER (WHERE start_bal > 0) AS students_in_scope,
                    coalesce(sum(start_bal) FILTER (WHERE start_bal > 0), 0) AS due_at_start,
-                   coalesce(sum(greatest(start_bal - now_bal, 0)) FILTER (WHERE start_bal > 0), 0) AS collected,
+                   coalesce((SELECT sum(p.amount) FROM payments p JOIN scope x ON x.id = p.student_id
+                             WHERE p.detected_at >= %(start)s AND x.start_bal > 0), 0) AS collected,
                    count(*) FILTER (WHERE start_bal > 0 AND now_bal <= 0) AS students_cleared,
                    count(DISTINCT family_id) FILTER (WHERE start_bal > 0 AND EXISTS (
                        SELECT 1 FROM calls c WHERE c.student_id = scope.id AND c.called_at >= %(start)s)) AS families_contacted

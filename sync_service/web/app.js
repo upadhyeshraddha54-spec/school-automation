@@ -181,6 +181,8 @@ async function openStudent(id) {
       <h3>Follow-up history</h3>
       <div class="list">${s.follow_ups.length ? s.follow_ups.map((f) => `<div class="row"><span><b>${esc(f.label)}</b>${f.due_date ? " · " + fdate(f.due_date) : ""}</span>
         <span>${f.status === "open" ? '<span class="pill blue">Open</span>' : `<span class="pill ${f.status === "missed" ? "due" : f.status === "paid" ? "zero" : "grey"}">${esc({ done: "Done", missed: "Missed", paid: "Paid (Excel)", cancelled: "Cancelled" }[f.status] || f.status)}</span>`}</span></div>`).join("") : '<p class="muted">None.</p>'}</div>
+      <h3>Payments seen in Excel</h3>
+      <div class="list">${(s.payments || []).length ? s.payments.map((p) => `<div class="row"><span><b>${rupee(p.amount)}</b> <span class="muted">${p.basis === "paid_increased" ? "Paid amount went up" : "Balance went down"}</span></span><span class="muted">${ftime(p.detected_at)}</span></div>`).join("") : '<p class="muted">None yet.</p>'}</div>
       <h3>Fee history (from Excel)</h3>
       <div class="tablewrap"><table style="min-width:420px"><thead><tr><th>Date</th><th class="num">Total</th><th class="num">Paid</th><th class="num">Balance</th></tr></thead>
         <tbody>${s.fee_history.map((f) => `<tr><td>${fdate(f.captured_at)}${f.source !== "excel" ? ' <span class="pill grey">reviewed</span>' : ""}</td><td class="num">${rupee(f.total_fee)}</td><td class="num">${rupee(f.paid)}</td><td class="num">${rupee(f.balance)}</td></tr>`).join("")}</tbody></table></div>`;
@@ -266,7 +268,8 @@ async function pageDashboard(main) {
     </section>
     <div class="grid2">
       <section class="panel" id="queuePanel">
-        <div class="panel-head"><h2>Call next parent</h2><span class="muted" id="qCounts"></span></div>
+        <div class="panel-head"><h2>Call next parent</h2><span class="row-btns"><span class="muted" id="qCounts"></span>
+          <a class="btn small" id="csvList" href="/queue.csv" download>Download today's list</a></span></div>
         ${classFilters(dashState, { search: true, placeholder: "Student or phone" })}
         <div id="qCurrent"><p class="muted">Loading…</p></div>
         <div id="qNext"></div>
@@ -290,6 +293,7 @@ async function pageDashboard(main) {
   const loadQueue = async () => {
     try {
       const q = await api("/queue?" + qs({ ...dashState, page_size: 40 }));
+      $("#csvList").href = "/queue.csv?" + qs({ medium: dashState.medium, std: dashState.std, section: dashState.section });
       const c = q.counts;
       $("#qCounts").textContent = `${q.total} to call · ${q.families_done_today} done today`;
       if (qIndex >= q.items.length) qIndex = 0;
@@ -408,10 +412,10 @@ function reviewHTML(r) {
 }
 const runPill = (s) => ({ applied: '<span class="pill zero">Synced</span>', dry_run: '<span class="pill grey">Check only</span>',
   failed: '<span class="pill due">Failed</span>', running: '<span class="pill amber">Running</span>' }[s] || esc(s));
-const TRIGGER = { watcher: "File saved", reconcile: "Regular re-check", api: "From the app", manual: "Command line", upload: "Add Excel" };
+const TRIGGER = { watcher: "File saved", reconcile: "Regular re-check", api: "From the app", manual: "Command line", upload: "Add Excel", onedrive: "OneDrive" };
 
 async function syncView(view, st) {
-  const [reviews, runs] = await Promise.all([api("/review"), api("/sync/runs?page_size=15")]);
+  const [reviews, runs, od] = await Promise.all([api("/review"), api("/sync/runs?page_size=15"), api("/onedrive/status")]);
   const yes = (b) => (b ? "Yes" : "No");
   view.innerHTML = `
     ${st.test_mode ? '<div class="note info">Test mode: only synthetic test files are used. No real school data.</div>'
@@ -431,6 +435,13 @@ async function syncView(view, st) {
         <div class="list">${reviews.map(reviewHTML).join("") || '<p class="muted">Nothing to check.</p>'}</div>
       </section>
     </div>
+    <section class="panel"><div class="panel-head"><h2>OneDrive</h2>${od.enabled ? '<button class="btn main" id="odBtn">Sync from OneDrive now</button>' : '<span class="pill grey">Not switched on</span>'}</div>
+      ${od.enabled ? `<dl class="kv"><dt>Folder</dt><dd>${esc(od.folder)} <span class="muted">(${esc(od.drive)})</span></dd>
+        <dt>Signed in</dt><dd>${od.auth === "client_credentials" ? "App access" : od.token_cached ? "Yes" : "No (run onedrive-login)"}</dd>
+        <dt>Files tracked</dt><dd>${od.files_tracked}</dd>
+        <dt>Last check</dt><dd>${od.last ? `${ftime(od.last.last_run)} · ${od.last.ok ? `<span class="pill zero">OK</span> ${od.last.files_changed} changed` : `<span class="pill due">Problem</span> ${esc(od.last.error)}`}` : "Never"}</dd></dl>
+        <p class="muted small-note">Read-only: the app downloads copies and never changes files in OneDrive.</p><div id="odResult"></div>`
+      : '<p class="muted small-note" style="margin:0">Class files can come straight from the school\'s OneDrive folder (read-only). Set up [onedrive] in the configuration to switch this on.</p>'}</section>
     ${st.current_errors.length ? `<section class="panel"><h2>Problems in the latest files</h2><div class="list">${st.current_errors.map((i) => `<div class="row"><span><span class="pill due">Not synced</span> ${esc(i.message)}</span><span class="muted">${esc(i.file_path.split(/[\\/]/).pop())}${i.sheet ? " · " + esc(i.sheet) : ""}${i.row_number ? " row " + i.row_number : ""}</span></div>`).join("")}</div></section>` : ""}
     <section class="panel"><h2>Recent syncs</h2>
       <div class="tablewrap"><table><thead><tr><th>When</th><th>File</th><th>How</th><th>Result</th><th class="num">New</th><th class="num">Fee updates</th><th class="num">To check</th><th class="num">Errors</th></tr></thead>
@@ -446,6 +457,14 @@ async function syncView(view, st) {
         <p class="muted">Dry run: nothing was changed.</p>`;
     } catch (er) { fail(er); }
     e.target.disabled = false; e.target.textContent = "Check the folder now (dry run)";
+  };
+  if ($("#odBtn")) $("#odBtn").onclick = async (e) => {
+    e.target.disabled = true; e.target.textContent = "Checking OneDrive…";
+    try {
+      const r = await api("/onedrive/sync", { method: "POST" });
+      $("#odResult").innerHTML = `<div class="note ok">${r.downloaded_or_renamed.length} file(s) changed, ${r.unchanged} unchanged${r.removed.length ? `, ${r.removed.length} removed in OneDrive (data kept)` : ""}${r.blocked_not_synthetic.length ? `, ${r.blocked_not_synthetic.length} blocked (test mode)` : ""}.</div>`;
+    } catch (er) { fail(er); }
+    e.target.disabled = false; e.target.textContent = "Sync from OneDrive now";
   };
   view.addEventListener("click", async (e) => {
     const b = e.target.closest("[data-review]");
@@ -595,16 +614,39 @@ async function pageCalls(main) {
 }
 
 // ------------------------------------------------------------------ Messages (drafts; nothing is sent)
-const msgState = { status: "", page: 1, lang: store.get("fcd_lang", "mr"), draft: null };
+const msgState = { status: "", channel: "", page: 1, lang: store.get("fcd_lang", "mr"), draft: null };
+const CHANNEL = { whatsapp: '<span class="pill zero">WhatsApp</span>', sms: '<span class="pill blue">SMS</span>', manual: '<span class="pill grey">Copy</span>' };
+const STATUS_PILL = { draft: '<span class="pill blue">Draft</span>', approved: '<span class="pill zero">Approved</span>', discarded: '<span class="pill grey">Discarded</span>' };
 async function pageMessages(main, params) {
-  main.innerHTML = `<div class="note warn">Sending is turned off. Prepare a reminder, edit it, approve it and copy it. No SMS, WhatsApp or email is sent by this app.</div>
-    <section class="panel"><h2>1. Choose a parent</h2>
+  main.innerHTML = `<div class="note warn">Sending is turned off. WhatsApp and SMS reminders are prepared as drafts for you to check, edit, approve and copy. Nothing is sent by this app.</div>
+    <section class="panel" id="bulkPanel"><h2>Prepare reminders for a whole list</h2>
+      <div class="filters"><label>List<select id="bList"><option>Loading…</option></select></label>
+        <label class="pick"><input type="checkbox" id="bWa" checked> WhatsApp</label><label class="pick"><input type="checkbox" id="bSms" checked> SMS</label>
+        <label>Language<select id="bLang">${Object.entries(META.languages).map(([k, v]) => `<option value="${k}" ${k === msgState.lang ? "selected" : ""}>${esc(v)}</option>`).join("")}</select></label>
+        <button class="btn main" id="bGo">Prepare drafts</button></div>
+      <p class="muted small-note">One draft per parent per channel per day; brothers and sisters are combined in one message. Parents without a mobile number are listed, not guessed.</p>
+      <div id="bResult"></div></section>
+    <section class="panel"><h2>Or one parent: choose</h2>
       <div class="filters"><label style="flex:1">Search<input type="search" id="msgSearch" placeholder="Student name or phone number"></label></div>
       <div class="list" id="msgResults"></div><div id="msgFamily"></div></section>
     <div id="msgEditor"></div>
     <section class="panel" id="draftPanel"><div class="panel-head"><h2>Drafts</h2>
-      <div class="filters">${selectHTML("status", "Show", [["draft", "Drafts"], ["approved", "Approved"], ["discarded", "Discarded"]], msgState.status)}</div></div>
-      <div id="draftList"></div></section>`;
+      <div class="filters">${selectHTML("status", "Show", [["draft", "Drafts"], ["approved", "Approved"], ["discarded", "Discarded"]], msgState.status)}
+        ${selectHTML("channel", "Channel", [["whatsapp", "WhatsApp"], ["sms", "SMS"], ["manual", "Copy"]], msgState.channel)}</div></div>
+      <div id="draftList"></div>
+      <div class="row-btns"><button class="btn good" id="apSel">Approve selected</button><button class="btn" id="dsSel">Discard selected</button></div></section>`;
+  api("/drafts/lists").then((ls) => { $("#bList").innerHTML = ls.map((l) => `<option value="${l.id}">${esc(l.label)} (${l.families})</option>`).join(""); }).catch(fail);
+  $("#bGo").onclick = async (e) => {
+    const channels = [$("#bWa").checked && "whatsapp", $("#bSms").checked && "sms"].filter(Boolean);
+    e.target.disabled = true;
+    try {
+      const r = await api("/drafts/batch", { method: "POST", body: { list: $("#bList").value, channels, lang: $("#bLang").value } });
+      $("#bResult").innerHTML = `<div class="note ok"><b>${r.created} draft${r.created === 1 ? "" : "s"} prepared</b> for “${esc(r.list)}”. Check and approve them below.
+        ${r.skipped.length ? `<details><summary>${r.skipped.length} not prepared</summary><div class="list">${r.skipped.map((x) => `<div class="row"><span>${esc(x.name)}</span><span class="muted">${esc(x.why)}</span></div>`).join("")}</div></details>` : ""}</div>`;
+      msgState.status = "draft"; msgState.page = 1; loadDrafts();
+    } catch (er) { fail(er); }
+    e.target.disabled = false;
+  };
   let t;
   $("#msgSearch").addEventListener("input", (e) => {
     clearTimeout(t);
@@ -636,15 +678,23 @@ async function pageMessages(main, params) {
     const box = $("#msgEditor");
     if (!d) { box.innerHTML = ""; return; }
     const pill = { draft: '<span class="pill blue">Draft</span>', approved: '<span class="pill zero">Approved</span>', discarded: '<span class="pill grey">Discarded</span>' }[d.status];
-    box.innerHTML = `<section class="panel"><div class="panel-head"><h2>3. Check, edit and approve</h2><span>${pill}${d.edited ? ' <span class="pill grey">edited</span>' : ""}</span></div>
+    box.innerHTML = `<section class="panel"><div class="panel-head"><h2>Check, edit and approve</h2><span>${CHANNEL[d.channel] || ""} ${pill}${d.edited ? ' <span class="pill grey">edited</span>' : ""}</span></div>
+      ${d.phone || d.children ? `<p class="muted" style="margin:0">${d.children ? esc(d.children) : ""}${d.phone ? " · to " + esc(d.phone) : ""}${d.template_name ? " · template " + esc(d.template_name) : d.channel === "whatsapp" || d.channel === "sms" ? " · no approved template set yet" : ""}</p>` : ""}
       ${(d.left_out || []).length ? `<div class="note info">Not included: ${d.left_out.map((x) => `${esc(x.name)} (${esc(x.why)})`).join(", ")}</div>` : ""}
       ${d.no_phone ? '<div class="note warn">No phone number for this parent in Excel.</div>' : ""}
       <textarea id="draftBody" lang="${esc(d.lang)}" ${d.status === "discarded" ? "readonly" : ""}>${esc(d.body)}</textarea>
+      ${d.channel === "sms" ? '<p class="muted small-note" id="smsCount"></p>' : ""}
       <div class="row-btns">${d.status !== "discarded" ? `<button class="btn" id="dSave">Save changes</button>` : ""}
         ${d.status === "draft" ? `<button class="btn main" id="dApprove">Approve</button>` : ""}
         <button class="btn" id="dCopy">Copy text</button>
         ${d.status !== "discarded" ? `<button class="btn bad" id="dDiscard">Discard</button>` : ""}</div>
       ${d.status === "approved" ? `<p class="muted" style="margin:0">Approved ${ftime(d.approved_at)}${d.approved_by ? " by " + esc(d.approved_by) : ""}. Sending is off: copy it and send it yourself if needed. Editing it makes it a draft again.</p>` : ""}</section>`;
+    if ($("#smsCount")) {
+      const count = () => { const t = $("#draftBody").value; const uni = /[^\x00-\x7F£€¥èéùìòÇØøÅåÆæßÉÄÖÑÜäöñüà§¿¡]/.test(t);
+        const n = [...t].length, parts = uni ? (n <= 70 ? 1 : Math.ceil(n / 67)) : (n <= 160 ? 1 : Math.ceil(n / 153));
+        $("#smsCount").textContent = `${n} characters · ${parts} SMS part${parts > 1 ? "s" : ""}${uni ? " (Hindi/Marathi text uses 70 characters per part)" : ""}`; };
+      $("#draftBody").addEventListener("input", count); count();
+    }
     const act = async (fn, msg) => { try { const r = await fn(); msgState.draft = r; editor(r); loadDrafts(); toast(msg); } catch (e) { fail(e); } };
     if ($("#dSave")) $("#dSave").onclick = () => act(() => api(`/drafts/${d.id}`, { method: "PUT", body: { body: $("#draftBody").value } }), "Changes saved");
     if ($("#dApprove")) $("#dApprove").onclick = async () => {
@@ -654,12 +704,32 @@ async function pageMessages(main, params) {
     if ($("#dDiscard")) $("#dDiscard").onclick = () => act(() => api(`/drafts/${d.id}/discard`, { method: "POST" }), "Discarded");
     $("#dCopy").onclick = async () => { try { await navigator.clipboard.writeText($("#draftBody").value); toast("Copied"); } catch { $("#draftBody").select(); toast("Press Ctrl+C / Cmd+C to copy"); } };
   };
+  let pageItems = [];
   const loadDrafts = async () => {
-    const d = await api("/drafts?" + qs({ status: msgState.status, page: msgState.page, page_size: 10 }));
+    const d = await api("/drafts?" + qs({ status: msgState.status, channel: msgState.channel, page: msgState.page, page_size: 15 }));
+    pageItems = d.items;
     const box = $("#draftList");
-    box.innerHTML = `<div class="tablewrap"><table><thead><tr><th>When</th><th>Children</th><th>Language</th><th>Status</th></tr></thead><tbody>${d.items.map((m) => `<tr class="click" data-draft="${m.id}" tabindex="0"><td>${ftime(m.updated_at)}</td><td>${esc(m.children || "")}</td><td>${esc(META.languages[m.lang] || m.lang)}</td><td>${{ draft: '<span class="pill blue">Draft</span>', approved: '<span class="pill zero">Approved</span>', discarded: '<span class="pill grey">Discarded</span>' }[m.status]}</td></tr>`).join("") || '<tr><td colspan="4" class="empty">No drafts yet.</td></tr>'}</tbody></table></div>`;
+    box.innerHTML = `<div class="tablewrap"><table><thead><tr><th><input type="checkbox" id="selAll" aria-label="Select all"></th><th>When</th><th>Channel</th><th>Children</th><th class="hide-sm">To</th><th>Status</th></tr></thead><tbody>${d.items.map((m) => `<tr class="click" data-draft="${m.id}" tabindex="0">
+        <td><input type="checkbox" data-sel="${m.id}" ${m.status === "discarded" ? "disabled" : ""} aria-label="Select"></td><td>${ftime(m.updated_at)}</td>
+        <td>${CHANNEL[m.channel] || ""}${m.segments ? ` <span class="muted">${m.segments} part${m.segments > 1 ? "s" : ""}</span>` : ""}</td><td>${esc(m.children || "")}<br><span class="muted">${esc(META.languages[m.lang] || m.lang)}</span></td>
+        <td class="hide-sm">${esc(m.phone || "–")}</td><td>${STATUS_PILL[m.status]}</td></tr>`).join("") || '<tr><td colspan="6" class="empty">No drafts yet.</td></tr>'}</tbody></table></div>`;
     box.append(pager(d, (pg) => { msgState.page = pg; loadDrafts().catch(fail); }));
-    box.onclick = async (e) => { const tr = e.target.closest("[data-draft]"); if (!tr) return; const all = await api("/drafts?" + qs({ page_size: 100 })); const dd = all.items.find((x) => String(x.id) === tr.dataset.draft); if (dd) { msgState.draft = dd; editor(dd); $("#msgEditor").scrollIntoView({ block: "start" }); } };
+    $("#selAll").onchange = (e) => box.querySelectorAll("[data-sel]:not(:disabled)").forEach((c) => (c.checked = e.target.checked));
+    box.onclick = (e) => {
+      if (e.target.closest("input")) return;
+      const tr = e.target.closest("[data-draft]"); if (!tr) return;
+      const dd = pageItems.find((x) => String(x.id) === tr.dataset.draft);
+      if (dd) { msgState.draft = dd; editor(dd); $("#msgEditor").scrollIntoView({ block: "start" }); }
+    };
+  };
+  const selected = () => [...document.querySelectorAll("#draftList [data-sel]:checked")].map((c) => +c.dataset.sel);
+  $("#apSel").onclick = async () => {
+    const ids = selected(); if (!ids.length) { toast("Tick the drafts to approve", { bad: true }); return; }
+    try { const r = await api("/drafts/approve-many", { method: "POST", body: { ids, by: caller() } }); toast(`Approved ${r.approved.length}${r.skipped.length ? `, ${r.skipped.length} skipped` : ""}`); loadDrafts(); } catch (e) { fail(e); }
+  };
+  $("#dsSel").onclick = async () => {
+    const ids = selected(); if (!ids.length) { toast("Tick the drafts to discard", { bad: true }); return; }
+    try { await api("/drafts/discard-many", { method: "POST", body: { ids } }); toast(`Discarded ${ids.length}`); loadDrafts(); } catch (e) { fail(e); }
   };
   bindFilters($("#draftPanel"), msgState, () => loadDrafts().catch(fail));
   if (msgState.draft && !fid) editor(msgState.draft);
